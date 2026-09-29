@@ -116,6 +116,9 @@ func optionsToPrecompile() ([]Options, error) {
 			return opts, nil
 		},
 
+		// AMD GPU configurations use runtime compilation to avoid doubling
+		// every precompiled combination for this experimental device proxy.
+
 		// Expand TPUProxy vs not.
 		func(opt Options) ([]Options, error) {
 			tpuProxyYes := opt

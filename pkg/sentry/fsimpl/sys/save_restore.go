@@ -76,7 +76,11 @@ func (fs *filesystem) CompleteRestore(ctx context.Context, opts vfs.CompleteRest
 	}
 	busSub := make(map[string]kernfs.Inode)
 	kernelSub := kernelDir(ctx, fs, creds)
-	fs.addDMIDirs(ctx, creds, classSub, devicesSub)
+	virtualSub := make(map[string]kernfs.Inode)
+	fs.addDMIDirs(ctx, creds, classSub, virtualSub)
+	if len(virtualSub) != 0 {
+		devicesSub["virtual"] = fs.newDir(ctx, creds, defaultSysDirMode, virtualSub)
+	}
 
 	sysDevicesPath := path.Join(fs.testSysfsPathPrefix, sysDevicesMainPath)
 	iommuGroupsPath := path.Join(fs.testSysfsPathPrefix, iommuGroupSysPath)

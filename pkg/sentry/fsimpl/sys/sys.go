@@ -18,6 +18,7 @@ package sys
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/amdgpu"
 	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/coverage"
@@ -70,6 +72,8 @@ type InternalData struct {
 	// RDMA device topology (/sys/devices/pci..., /sys/class/infiniband*,
 	// /sys/class/net, /sys/class/pci_bus, /sys/bus/pci/devices) is constructed.
 	RDMASysfs *rdma.Snapshot
+	// AMDGPUSysfs contains static compute-device identity and KFD topology.
+	AMDGPUSysfs *amdgpu.Snapshot
 	// TestSysfsPathPrefix is a prefix for the sysfs paths. It is useful for
 	// unit testing.
 	TestSysfsPathPrefix string
@@ -138,6 +142,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	classSub := map[string]kernfs.Inode{ // /sys/class
 		"power_supply": fs.newDir(ctx, creds, defaultSysDirMode, nil),
 	}
+	virtualSub := map[string]kernfs.Inode{} // /sys/devices/virtual
 	devicesSub := map[string]kernfs.Inode{} // /sys/devices
 	systemSub := map[string]kernfs.Inode{   // /sys/devices/system
 		"cpu": cpuDir(ctx, fs, creds),
@@ -146,7 +151,8 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	busSub := make(map[string]kernfs.Inode)     // /sys/bus
 	pciDevices := make(map[string]kernfs.Inode) // /sys/bus/pci/devices
 	pciDrivers := make(map[string]kernfs.Inode) // /sys/bus/pci/drivers
-	kernelSub := kernelDir(ctx, fs, creds)      // /sys/kernel
+	charDevices := make(map[string]kernfs.Inode)
+	kernelSub := kernelDir(ctx, fs, creds) // /sys/kernel
 	if opts.InternalData != nil {
 		idata := opts.InternalData.(*InternalData)
 		fs.productName = idata.ProductName
@@ -191,31 +197,47 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 			}
 			kernelSub["iommu_groups"] = fs.newDir(ctx, creds, defaultSysDirMode, iommuGroups)
 		}
+
+		var hostNodes []uint32
 		if idata.RDMASysfs != nil {
-			rdmaDirs, err := fs.newRDMASysfs(ctx, creds, idata.RDMASysfs)
+			hostNodes = hostCPUNodes(idata.RDMASysfs.NUMA)
+		}
+		var deviceDirs []*sysfsDirs
+		if idata.AMDGPUSysfs != nil {
+			dirs, err := fs.newAMDGPUSysfs(ctx, creds, idata.AMDGPUSysfs, hostNodes)
 			if err != nil {
 				return nil, nil, err
 			}
-			for name, sub := range rdmaDirs.devices {
-				// The TPU-proxy devices and the RDMA ConnectX devices come from
-				// two different accelerator stacks and aren't exposed to the
-				// same sandbox today, so a shared /sys/devices root complex
-				// shouldn't occur. Deep-merging two sealed kernfs subtrees
-				// isn't supported, so reject an overlap.
-				if _, ok := devicesSub[name]; ok {
-					return nil, nil, fmt.Errorf("TPU proxy and RDMA sysfs both populate /sys/devices/%s", name)
-				}
-				devicesSub[name] = sub
+			deviceDirs = append(deviceDirs, dirs)
+		}
+		if idata.RDMASysfs != nil {
+			dirs, err := fs.newRDMASysfs(ctx, creds, idata.RDMASysfs)
+			if err != nil {
+				return nil, nil, err
 			}
-			for name, sub := range rdmaDirs.class {
-				classSub[name] = sub
+			deviceDirs = append(deviceDirs, dirs)
+		}
+		devicesTree := newDirTree()
+		for _, dirs := range deviceDirs {
+			if err := devicesTree.merge(dirs.devices); err != nil {
+				return nil, nil, err
 			}
-			for name, sub := range rdmaDirs.busPCIDevices {
-				pciDevices[name] = sub
+			maps.Copy(classSub, dirs.class)
+			maps.Copy(pciDevices, dirs.busPCIDevices)
+			maps.Copy(pciDrivers, dirs.busPCIDrivers)
+			maps.Copy(charDevices, dirs.devChar)
+		}
+		if virtual, ok := devicesTree.children["virtual"]; ok {
+			maps.Copy(virtualSub, fs.dirTreeEntries(ctx, creds, virtual))
+			delete(devicesTree.children, "virtual")
+		}
+		for name, sub := range devicesTree.children {
+			// The TPU proxy populates /sys/devices directly. Deep-merging into
+			// its sealed kernfs subtrees isn't supported, so reject an overlap.
+			if _, ok := devicesSub[name]; ok {
+				return nil, nil, fmt.Errorf("TPU proxy and device sysfs snapshots both populate /sys/devices/%s", name)
 			}
-			for name, sub := range rdmaDirs.busPCIDrivers {
-				pciDrivers[name] = sub
-			}
+			devicesSub[name] = fs.buildDirTree(ctx, creds, sub)
 		}
 		fs.enableNUMATopology = idata.EnableNUMATopology
 		if fs.enableNUMATopology {
@@ -234,14 +256,17 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	}
 	devicesSub["system"] = fs.newDir(ctx, creds, defaultSysDirMode, systemSub)
 
-	fs.addDMIDirs(ctx, creds, classSub, devicesSub)
+	fs.addDMIDirs(ctx, creds, classSub, virtualSub)
+	if len(virtualSub) != 0 {
+		devicesSub["virtual"] = fs.newDir(ctx, creds, defaultSysDirMode, virtualSub)
+	}
 	root := fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
 		"block": fs.newDir(ctx, creds, defaultSysDirMode, nil),
 		"bus":   fs.newDir(ctx, creds, defaultSysDirMode, busSub),
 		"class": fs.newDir(ctx, creds, defaultSysDirMode, classSub),
 		"dev": fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
 			"block": fs.newDir(ctx, creds, defaultSysDirMode, nil),
-			"char":  fs.newDir(ctx, creds, defaultSysDirMode, nil),
+			"char":  fs.newDir(ctx, creds, defaultSysDirMode, charDevices),
 		}),
 		"devices":  fs.newDir(ctx, creds, defaultSysDirMode, devicesSub),
 		"firmware": fs.newDir(ctx, creds, defaultSysDirMode, nil),
@@ -256,9 +281,9 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	return fs.VFSFilesystem(), rootD.VFSDentry(), nil
 }
 
-// addDMIDirs adds the DMI entries to classSub (/sys/class) and devicesSub
-// (/sys/devices) if fs.productName is set.
-func (fs *filesystem) addDMIDirs(ctx context.Context, creds *auth.Credentials, classSub, devicesSub map[string]kernfs.Inode) {
+// addDMIDirs adds the DMI entries to /sys/class and /sys/devices/virtual
+// if fs.productName is set.
+func (fs *filesystem) addDMIDirs(ctx context.Context, creds *auth.Credentials, classSub, virtualSub map[string]kernfs.Inode) {
 	if len(fs.productName) == 0 {
 		return
 	}
@@ -266,11 +291,9 @@ func (fs *filesystem) addDMIDirs(ctx context.Context, creds *auth.Credentials, c
 	classSub["dmi"] = fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
 		"id": kernfs.NewStaticSymlink(ctx, creds, linux.UNNAMED_MAJOR, fs.devMinor, fs.NextIno(), "../../devices/virtual/dmi/id"),
 	})
-	devicesSub["virtual"] = fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
-		"dmi": fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
-			"id": fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
-				"product_name": fs.newStaticFile(ctx, creds, defaultSysMode, fs.productName+"\n"),
-			}),
+	virtualSub["dmi"] = fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
+		"id": fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
+			"product_name": fs.newStaticFile(ctx, creds, defaultSysMode, fs.productName+"\n"),
 		}),
 	})
 }

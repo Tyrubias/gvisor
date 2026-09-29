@@ -396,6 +396,9 @@ type Config struct {
 	// AppHugePages enables support for application huge pages.
 	AppHugePages bool `flag:"app-huge-pages"`
 
+	// AMDGPUProxy controls support for AMD GPUs.
+	AMDGPUProxy AMDGPUProxyMode `flag:"amdgpuproxy"`
+
 	// NVProxy enables support for Nvidia GPUs.
 	NVProxy bool `flag:"nvproxy"`
 
@@ -597,6 +600,10 @@ func (c *Config) Validate() error {
 	if c.Platform == PlatformAuto && paths.any != "" {
 		// A single path cannot apply to every platform that auto may choose.
 		return fmt.Errorf("--platform=%s accepts only --platform_device_path={platform}={path}[,{platform}={path}...], got %q", PlatformAuto, c.PlatformDevicePath)
+	}
+
+	if c.AMDGPUProxy != AMDGPUProxyDisabled && c.Platform != "kvm" {
+		return fmt.Errorf("--amdgpuproxy=%v requires --platform=kvm", c.AMDGPUProxy)
 	}
 	if c.Overlay && c.Overlay2.Enabled() {
 		// Deprecated flag was used together with flag that replaced it.
@@ -2111,4 +2118,52 @@ func (n *NetgoferMode) Set(v string) error {
 		return fmt.Errorf("invalid netgofer mode %q (must be one of: off, proxy, proxy-loopback)", v)
 	}
 	return nil
+}
+
+// AMDGPUProxyMode controls support for AMD GPUs.
+type AMDGPUProxyMode int
+
+// AMDGPUProxyMode values.
+const (
+	// AMDGPUProxyDisabled disables AMD GPU support.
+	AMDGPUProxyDisabled AMDGPUProxyMode = iota
+
+	// AMDGPUProxyCompute exposes /dev/kfd and the DRM render nodes granted
+	// by the OCI spec, for ROCm compute.
+	AMDGPUProxyCompute
+)
+
+// Set implements flag.Value.
+func (m *AMDGPUProxyMode) Set(v string) error {
+	switch v {
+	case "disabled":
+		*m = AMDGPUProxyDisabled
+	case "compute":
+		*m = AMDGPUProxyCompute
+	default:
+		return fmt.Errorf("invalid AMD GPU proxy mode %q; must be disabled or compute", v)
+	}
+	return nil
+}
+
+// Get implements flag.Get.
+func (m *AMDGPUProxyMode) Get() any {
+	return *m
+}
+
+// String implements flag.String.
+func (m AMDGPUProxyMode) String() string {
+	switch m {
+	case AMDGPUProxyDisabled:
+		return "disabled"
+	case AMDGPUProxyCompute:
+		return "compute"
+	default:
+		panic(fmt.Sprintf("Invalid AMD GPU proxy mode %d", m))
+	}
+}
+
+// Ptr returns a pointer to m.
+func (m AMDGPUProxyMode) Ptr() *AMDGPUProxyMode {
+	return &m
 }
