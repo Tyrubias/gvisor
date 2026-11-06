@@ -12,12 +12,12 @@ reproduces the host's KFD topology under `/sys`, so ROCm's device discovery
 behaves the same inside the sandbox as on the host.
 
 AMD GPU support is **experimental**. It has been validated with HIP and PyTorch
-workloads on MI300X (gfx942) and MI355X (gfx950) GPUs, and `runsc` refuses
+workloads on MI300X (gfx942) and MI350X/MI355X (gfx950) GPUs, and `runsc` refuses
 other GPU models. For NVIDIA GPUs, see [NVIDIA GPU Support](gpu.md).
 
 ## Enabling AMD GPU support
 
-Pass `--amdgpuproxy=compute` to `runsc`. The [KVM platform](platforms.md) is
+Pass `--amdgpuproxy=compute` to `runsc`. The [systrap platform](platforms.md) is
 required (see [Limitations](#limitations)). The container's OCI spec must list
 `/dev/kfd` and the render node of every GPU the container may use; GPUs whose
 render node is not listed are not exposed, and `runsc` verifies that each
@@ -40,7 +40,7 @@ HIP_VMEM_MANAGE_SUPPORT=0
 ```
 
 With Docker, register a runtime whose `runsc` is invoked with
-`--platform=kvm --amdgpuproxy=compute`, then grant the devices with `--device`:
+`--platform=systrap --amdgpuproxy=compute`, then grant the devices with `--device`:
 
 ```
 $ docker run --runtime=runsc --rm \
@@ -57,17 +57,9 @@ peer-to-peer copies between them are supported.
 
 ## Limitations
 
-*   **One GPU process per sandbox.** KFD binds all of a process's GPU state to
-    the host address space that opened `/dev/kfd`, which in gVisor is the
-    sentry's. A sandbox therefore has a single GPU context: the first
-    application process to open a GPU device owns it for the lifetime of the
-    sandbox, other processes, including forked children, get `EBUSY`, and the
-    GPU memory of a process that exits is only released when the sandbox exits.
-    Frameworks that run one process per GPU, such as `torchrun`, are not
-    supported; run one GPU process per sandbox.
-*   **KVM platform only.** KFD only maps its doorbell pages into the process
-    that opened `/dev/kfd`. Of gVisor's platforms, only KVM maps device memory
-    for the application from the sentry itself.
+*   **Systrap platform only.** KFD opens, ioctls, and device mappings execute
+    in the application's host address space. Multiple processes can use the
+    GPU concurrently. Forked children must open their own KFD descriptor.
 *   **Unsupported ROCm features.** Shared virtual memory (SVM) and XNACK retry
     faults, SDMA engines, DMA-BUF export and import, GPU IPC, the runtime
     debugger, and checkpoint/restore are not supported. `hipMallocManaged()`
@@ -85,8 +77,8 @@ and the host driver is trusted to handle those requests as it would for any
 unprivileged native process. The proxy's own job is to keep the application's
 pointers and file descriptors out of the sentry's address space: `ioctl`
 arguments and their nested buffers are copied through the sentry, registered
-application memory is pinned, and XNACK is kept off so that GPU page faults can
-never be resolved against the sentry's memory. Vulnerabilities in the host
+application memory is pinned, and XNACK is kept off so that GPU retry faults
+cannot access the platform's private mappings. Vulnerabilities in the host
 driver's handling of the forwarded requests are not mitigated, so **AMD driver
 updates must be part of any security plan with or without gVisor**. The
 [design notes](https://github.com/google/gvisor/blob/master/pkg/sentry/devices/amdgpuproxy/README.md)

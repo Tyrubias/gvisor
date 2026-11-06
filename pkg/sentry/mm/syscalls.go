@@ -507,6 +507,7 @@ func (mm *MemoryManager) MRemap(ctx context.Context, oldAddr hostarch.Addr, oldS
 			GrowsDown:             vma.growsDown,
 			Stack:                 vma.isStack,
 			EagerForkCopy:         vma.eagerForkCopy,
+			DontFork:              vma.dontfork,
 			RequirePlatformEffect: vma.requirePlatformEffect,
 			MLockMode:             vma.mlockMode,
 			Name:                  vma.name,

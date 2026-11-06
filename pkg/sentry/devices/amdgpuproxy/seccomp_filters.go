@@ -17,13 +17,11 @@ package amdgpuproxy
 import (
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/amdgpu"
-	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/seccomp"
 )
 
-// Filters returns the host syscalls that amdgpuproxy needs beyond the base
-// filter.
-func Filters() seccomp.SyscallRules {
+// HostMMIOIoctlRules returns the ioctl requests admitted in application stubs.
+func HostMMIOIoctlRules() seccomp.SyscallRule {
 	var ioctls seccomp.Or
 	for _, cmd := range []uint32{
 		amdgpu.DRM_IOCTL_VERSION,
@@ -51,18 +49,12 @@ func Filters() seccomp.SyscallRules {
 	} {
 		ioctls = append(ioctls, seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(uintptr(cmd))})
 	}
+	return ioctls
+}
+
+// Filters returns the host syscalls required by the proxy.
+func Filters() seccomp.SyscallRules {
 	return seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
-		unix.SYS_IOCTL: ioctls,
-		// Each application open of /dev/kfd duplicates the sentry's FD.
-		unix.SYS_DUP: seccomp.PerArg{seccomp.NonNegativeFD{}},
-		// USERPTR aliases are assembled by duplicating internal mappings.
-		unix.SYS_MREMAP: seccomp.PerArg{
-			seccomp.AnyValue{},
-			seccomp.EqualTo(0),
-			seccomp.AnyValue{},
-			seccomp.EqualTo(linux.MREMAP_MAYMOVE | linux.MREMAP_FIXED),
-			seccomp.AnyValue{},
-			seccomp.EqualTo(0),
-		},
+		unix.SYS_IOCTL: HostMMIOIoctlRules(),
 	})
 }

@@ -42,7 +42,6 @@ import (
 	"gvisor.dev/gvisor/pkg/prometheus"
 	"gvisor.dev/gvisor/pkg/rdma"
 	"gvisor.dev/gvisor/pkg/ring0"
-	"gvisor.dev/gvisor/pkg/sentry/devices/amdgpuproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
 	"gvisor.dev/gvisor/pkg/sentry/hostmm"
@@ -616,15 +615,6 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 		}
 	}
 
-	amdKFDFD := -1
-	if specutils.AMDGPUProxyEnabled(spec, conf) {
-		// This must happen in the process that runs the sentry, after any
-		// re-exec.
-		if amdKFDFD, err = amdgpuproxy.OpenKFD(); err != nil {
-			util.Fatalf("opening /dev/kfd: %v", err)
-		}
-	}
-
 	if b.syncUsernsFD >= 0 {
 		// syncUsernsFD is set, but runsc hasn't been re-executed with a new UID and GID.
 		// We expect that setCapsAndCallSelf has to be called in this case.
@@ -760,7 +750,6 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 		TotalHostMem:        b.totalHostMem,
 		UserLogFD:           b.userLogFD,
 		AMDGPUSysfs:         amdgpuSnap,
-		AMDKFDFD:            amdKFDFD,
 		RDMASysfs:           rdmaSnap,
 		ProductName:         b.productName,
 		PodInitConfigFD:     b.podInitConfigFD,

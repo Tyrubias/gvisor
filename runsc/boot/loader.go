@@ -48,6 +48,7 @@ import (
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/sentry/control"
+	"gvisor.dev/gvisor/pkg/sentry/devices/amdgpuproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
 	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy/cxproxy"
@@ -265,9 +266,6 @@ type Loader struct {
 
 	// amdgpuSysfs is the AMD GPU sysfs snapshot, or nil when disabled.
 	amdgpuSysfs *amdgpu.Snapshot
-
-	// amdKFDFD is the sentry's /dev/kfd, or -1 when disabled.
-	amdKFDFD int
 
 	// cpuQuota and cpuPeriod are the raw host CFS settings that should be
 	// exposed through sandbox cgroupfs.
@@ -554,8 +552,6 @@ type Args struct {
 	RDMASysfs *rdma.Snapshot
 	// AMDGPUSysfs is the AMD GPU sysfs snapshot, or nil when disabled.
 	AMDGPUSysfs *amdgpu.Snapshot
-	// AMDKFDFD is the sentry's /dev/kfd, or -1 when disabled.
-	AMDKFDFD int
 	// PodInitConfigFD is the file descriptor to a file passed in the
 	//	--pod-init-config flag
 	PodInitConfigFD int
@@ -732,7 +728,6 @@ func New(args Args) (*Loader, error) {
 		productName:           args.ProductName,
 		rdmaSysfs:             args.RDMASysfs,
 		amdgpuSysfs:           args.AMDGPUSysfs,
-		amdKFDFD:              args.AMDKFDFD,
 		cpuQuota:              args.CPUQuota,
 		cpuPeriod:             args.CPUPeriod,
 		hostTHP:               args.HostTHP,
@@ -984,7 +979,7 @@ func New(args Args) (*Loader, error) {
 	}
 	args.StartupTimer.Reached("kernel initialized")
 
-	if err := registerFilesystems(l.k, &l.root, l.rdmaSysfs, l.amdgpuSysfs, l.amdKFDFD); err != nil {
+	if err := registerFilesystems(l.k, &l.root, l.rdmaSysfs, l.amdgpuSysfs); err != nil {
 		return nil, fmt.Errorf("registering filesystems: %w", err)
 	}
 	args.StartupTimer.Reached("filesystems registered")
@@ -1263,10 +1258,18 @@ func createPlatform(spec *specs.Spec, conf *config.Config, numCPU int, deviceFil
 		}
 		hostMMIOIoctlRules = nvproxy.HostMMIOIoctlRules(caps)
 	}
+	if specutils.AMDGPUProxyEnabled(spec, conf) {
+		if hostMMIOIoctlRules == nil {
+			hostMMIOIoctlRules = amdgpuproxy.HostMMIOIoctlRules()
+		} else {
+			hostMMIOIoctlRules = seccomp.Or{hostMMIOIoctlRules, amdgpuproxy.HostMMIOIoctlRules()}
+		}
+	}
 
 	log.Infof("Platform: %s", platformName)
 	plat, err := p.New(platform.Options{
 		HostMMIOIoctlRules:     hostMMIOIoctlRules,
+		HostDeviceIO:           specutils.AMDGPUProxyEnabled(spec, conf),
 		DeviceFile:             deviceFile,
 		DisableSyscallPatching: platformName == "systrap" && conf.SystrapDisableSyscallPatching,
 		DisableFastPath:        platformName == "systrap" && conf.SystrapDisableFastPath,

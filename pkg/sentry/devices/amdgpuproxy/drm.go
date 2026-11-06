@@ -19,6 +19,7 @@ import (
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
 
 // maxDRMBuffer bounds the nested buffers of DRM queries.
@@ -53,7 +54,7 @@ func (fd *deviceFD) drmVersion(t *kernel.Task, addr hostarch.Addr) error {
 		}
 		*f.ptr = hostBufferPointer(bufs[i])
 	}
-	err := fd.call(amdgpu.DRM_IOCTL_VERSION, &v, bufs[0], bufs[1], bufs[2])
+	err := fd.call(t, amdgpu.DRM_IOCTL_VERSION, &v, platform.HostIoctlBuffer{PointerOffset: 24, Data: bufs[0]}, platform.HostIoctlBuffer{PointerOffset: 40, Data: bufs[1]}, platform.HostIoctlBuffer{PointerOffset: 56, Data: bufs[2]})
 	for i, f := range fields {
 		*f.ptr = ptrs[i]
 		if err == nil && len(bufs[i]) != 0 {
@@ -81,7 +82,7 @@ func (fd *deviceFD) drmInfo(t *kernel.Task, addr hostarch.Addr) error {
 		return err
 	}
 	v.ReturnPointer = hostBufferPointer(out)
-	if err := fd.call(amdgpu.DRM_IOCTL_AMDGPU_INFO, &v, out); err != nil {
+	if err := fd.call(t, amdgpu.DRM_IOCTL_AMDGPU_INFO, &v, platform.HostIoctlBuffer{PointerOffset: 0, Data: out}); err != nil {
 		return err
 	}
 	_, err := t.CopyOutBytes(ptr, out)

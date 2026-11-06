@@ -385,6 +385,10 @@ syscall_test(
 )
 
 syscall_test(
+    test = "//test/syscalls/linux:kfd_test",
+)
+
+syscall_test(
     test = "//test/syscalls/linux:kill_test",
 )
 

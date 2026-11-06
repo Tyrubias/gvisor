@@ -15,6 +15,7 @@
 package amdgpuproxy
 
 import (
+	"math/bits"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/abi/amdgpu"
@@ -23,6 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
 
 // maxGPUs bounds per-GPU arrays copied for an ioctl.
@@ -35,10 +37,10 @@ type ioctlArgs interface {
 }
 
 // call forwards cmd with argument v, updating v with the driver's output.
-func (fd *deviceFD) call(cmd uint32, v marshal.Marshallable, nested ...[]byte) error {
+func (fd *deviceFD) call(t *kernel.Task, cmd uint32, v marshal.Marshallable, nested ...platform.HostIoctlBuffer) error {
 	b := make([]byte, v.SizeBytes())
 	v.MarshalBytes(b)
-	err := hostIoctl(fd.hostFD, cmd, b, nested...)
+	err := fd.hostIoctl(t, cmd, b, nested...)
 	v.UnmarshalBytes(b)
 	return err
 }
@@ -63,7 +65,7 @@ func (fd *deviceFD) gpuIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr, v i
 	if !fd.dev.proxy.gpus[*gpuID] {
 		return linuxerr.EINVAL
 	}
-	return copyOut(t, cmd, addr, v, fd.call(cmd, v))
+	return copyOut(t, cmd, addr, v, fd.call(t, cmd, v))
 }
 
 // passthrough forwards an ioctl whose argument needs no translation.
@@ -74,7 +76,7 @@ func (fd *deviceFD) passthrough(t *kernel.Task, cmd uint32, addr hostarch.Addr) 
 			return err
 		}
 	}
-	err := hostIoctl(fd.hostFD, cmd, b)
+	err := fd.hostIoctl(t, cmd, b)
 	if cmd&(linux.IOC_READ<<linux.IOC_DIRSHIFT) != 0 {
 		if _, cerr := t.CopyOutBytes(addr, b); cerr != nil {
 			return cerr
@@ -135,16 +137,14 @@ func (fd *deviceFD) createQueue(t *kernel.Task, addr hostarch.Addr) error {
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
-	// Compute queue addresses are GPU virtual addresses. SDMA queues are
-	// excluded because the driver's sdma_activity sysfs statistic reads
-	// their read pointer as a CPU address of the KFD process, the sentry.
+	// SDMA queues require preparation of their CPU read-pointer mappings.
 	if v.QueueType != amdgpu.KFD_IOC_QUEUE_TYPE_COMPUTE && v.QueueType != amdgpu.KFD_IOC_QUEUE_TYPE_COMPUTE_AQL {
 		return linuxerr.EINVAL
 	}
 	if !fd.dev.proxy.gpus[v.GPUID] {
 		return linuxerr.EINVAL
 	}
-	return copyOut(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, addr, &v, fd.call(amdgpu.AMDKFD_IOC_CREATE_QUEUE, &v))
+	return copyOut(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, addr, &v, fd.call(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, &v))
 }
 
 // createEvent checks that an application-supplied signal page holds the
@@ -157,7 +157,7 @@ func (fd *deviceFD) createEvent(t *kernel.Task, addr hostarch.Addr) error {
 		return err
 	}
 	if v.EventPageOffset != 0 {
-		p := fd.dev.proxy
+		p := fd.context
 		p.mu.Lock()
 		a := p.allocations[v.EventPageOffset]
 		p.mu.Unlock()
@@ -165,7 +165,7 @@ func (fd *deviceFD) createEvent(t *kernel.Task, addr hostarch.Addr) error {
 			return linuxerr.EINVAL
 		}
 	}
-	return copyOut(t, cmd, addr, &v, fd.call(cmd, &v))
+	return copyOut(t, cmd, addr, &v, fd.call(t, cmd, &v))
 }
 
 func (fd *deviceFD) setXNACKMode(t *kernel.Task, addr hostarch.Addr) error {
@@ -173,12 +173,11 @@ func (fd *deviceFD) setXNACKMode(t *kernel.Task, addr hostarch.Addr) error {
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
-	// XNACK was turned off by OpenKFD and must stay off. Negative values
-	// query the current mode.
+	// Retry faults require SVM support. Negative values query the current mode.
 	if v.XNACKEnabled > 0 {
 		return linuxerr.EPERM
 	}
-	return copyOut(t, amdgpu.AMDKFD_IOC_SET_XNACK_MODE, addr, &v, fd.call(amdgpu.AMDKFD_IOC_SET_XNACK_MODE, &v))
+	return copyOut(t, amdgpu.AMDKFD_IOC_SET_XNACK_MODE, addr, &v, fd.call(t, amdgpu.AMDKFD_IOC_SET_XNACK_MODE, &v))
 }
 
 // getProcessApertures returns the apertures of the granted GPUs. A request
@@ -190,7 +189,7 @@ func (fd *deviceFD) getProcessApertures(t *kernel.Task, addr hostarch.Addr) erro
 		return err
 	}
 	var all amdgpu.KFDGetProcessApertures
-	if err := fd.call(cmd, &all); err != nil {
+	if err := fd.call(t, cmd, &all); err != nil {
 		return err
 	}
 	if all.NumOfNodes > maxGPUs {
@@ -201,7 +200,7 @@ func (fd *deviceFD) getProcessApertures(t *kernel.Task, addr hostarch.Addr) erro
 	buf := make([]byte, int(all.NumOfNodes)*size)
 	if len(buf) != 0 {
 		all.AperturesPtr = hostBufferPointer(buf)
-		if err := fd.call(cmd, &all, buf); err != nil {
+		if err := fd.call(t, cmd, &all, platform.HostIoctlBuffer{PointerOffset: 0, Data: buf}); err != nil {
 			return err
 		}
 	}
@@ -238,7 +237,7 @@ func (fd *deviceFD) acquireVM(t *kernel.Task, addr hostarch.Addr) error {
 		return linuxerr.EINVAL
 	}
 	v.DRMFD = uint32(render.hostFD)
-	return fd.call(amdgpu.AMDKFD_IOC_ACQUIRE_VM, &v)
+	return fd.call(t, amdgpu.AMDKFD_IOC_ACQUIRE_VM, &v)
 }
 
 func (fd *deviceFD) allocMemory(t *kernel.Task, addr hostarch.Addr) error {
@@ -249,21 +248,20 @@ func (fd *deviceFD) allocMemory(t *kernel.Task, addr hostarch.Addr) error {
 	if !fd.dev.proxy.gpus[v.GPUID] {
 		return linuxerr.EINVAL
 	}
-	a := &allocation{size: v.Size, memType: hostarch.MemoryTypeUncached}
+	const allocTypes = (1 << 5) - 1
+	if bits.OnesCount32(v.Flags&allocTypes) != 1 {
+		return linuxerr.EINVAL
+	}
+	a := &allocation{size: v.Size}
 	if v.Flags&amdgpu.KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM != 0 {
 		// The driver maps an AQL queue buffer twice over half the size.
 		a.size >>= 1
 	}
 	userAddr := v.MmapOffset
-	switch {
-	case v.Flags&amdgpu.KFD_IOC_ALLOC_MEM_FLAGS_VRAM != 0:
-		a.memType = hostarch.MemoryTypeWriteCombine
-	case v.Flags&amdgpu.KFD_IOC_ALLOC_MEM_FLAGS_GTT != 0:
-		a.memType = hostarch.MemoryTypeWriteBack
-	case v.Flags&amdgpu.KFD_IOC_ALLOC_MEM_FLAGS_USERPTR != 0:
+	if v.Flags&amdgpu.KFD_IOC_ALLOC_MEM_FLAGS_USERPTR != 0 {
 		// MmapOffset is the application address to register. The driver
-		// keeps faulting it in through its MMU notifier for as long as the
-		// allocation exists, so give it a sentry alias of pinned pages.
+		// retains the address through its MMU notifier. Keep gVisor backing
+		// referenced and populate the application's host mappings.
 		um, err := pinUserMemory(t, v.MmapOffset, v.Size)
 		if err != nil {
 			return err
@@ -271,19 +269,18 @@ func (fd *deviceFD) allocMemory(t *kernel.Task, addr hostarch.Addr) error {
 		a.userptr = um
 		v.MmapOffset = uint64(um.hostAddr)
 	}
-	p := fd.dev.proxy
+	p := fd.context
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	err := fd.call(amdgpu.AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &v)
+	err := fd.call(t, amdgpu.AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &v)
 	if err != nil {
 		if a.userptr != nil {
 			a.userptr.release()
 			v.MmapOffset = userAddr
 		}
 	} else {
-		a.mmapOffset = v.MmapOffset
 		p.allocations[v.Handle] = a
 	}
+	p.mu.Unlock()
 	return copyOut(t, amdgpu.AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, addr, &v, err)
 }
 
@@ -292,10 +289,10 @@ func (fd *deviceFD) freeMemory(t *kernel.Task, addr hostarch.Addr) error {
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
-	p := fd.dev.proxy
+	p := fd.context
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := fd.call(amdgpu.AMDKFD_IOC_FREE_MEMORY_OF_GPU, &v); err != nil {
+	if err := fd.call(t, amdgpu.AMDKFD_IOC_FREE_MEMORY_OF_GPU, &v); err != nil {
 		return err
 	}
 	if a := p.allocations[v.Handle]; a != nil {
@@ -326,13 +323,13 @@ func (fd *deviceFD) mapMemory(t *kernel.Task, cmd uint32, addr hostarch.Addr) er
 		}
 	}
 	v.DeviceIDsArrayPtr = hostBufferPointer(ids)
-	err := fd.call(cmd, &v, ids)
+	err := fd.call(t, cmd, &v, platform.HostIoctlBuffer{PointerOffset: 8, Data: ids})
 	v.DeviceIDsArrayPtr = ptr
 	return copyOut(t, cmd, addr, &v, err)
 }
 
-// waitEvents forwards WAIT_EVENTS as a sequence of bounded host waits, so
-// that the task remains interruptible.
+// waitEvents polls between interruptible sleeps so a host wait does not
+// prevent application threads from making progress.
 func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 	var v amdgpu.KFDWaitEvents
 	if _, err := v.CopyIn(t, addr); err != nil {
@@ -363,12 +360,12 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 		if !deadline.IsZero() {
 			wait = max(min(wait, time.Until(deadline)), 0)
 		}
-		v.Timeout = uint32((wait + time.Millisecond - 1) / time.Millisecond)
-		err = fd.call(amdgpu.AMDKFD_IOC_WAIT_EVENTS, &v, events)
+		v.Timeout = 0
+		err = fd.call(t, amdgpu.AMDKFD_IOC_WAIT_EVENTS, &v, platform.HostIoctlBuffer{PointerOffset: 0, Data: events})
 		if err != nil || v.WaitResult != amdgpu.KFD_IOC_WAIT_RESULT_TIMEOUT || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			break
 		}
-		if t.Interrupted() {
+		if _, err := t.BlockWithTimeout(nil, true, wait); err != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, err) {
 			err = linuxerr.ERESTARTSYS
 			break
 		}

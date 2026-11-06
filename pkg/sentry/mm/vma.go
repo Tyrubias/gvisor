@@ -130,6 +130,7 @@ func (mm *MemoryManager) createVMALocked(ctx context.Context, opts memmap.MMapOp
 		growsDown:             opts.GrowsDown,
 		isStack:               opts.Stack,
 		eagerForkCopy:         opts.EagerForkCopy,
+		dontfork:              opts.DontFork,
 		requirePlatformEffect: opts.RequirePlatformEffect,
 		sealed:                opts.Sealed,
 		mlockMode:             opts.MLockMode,

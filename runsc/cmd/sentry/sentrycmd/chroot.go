@@ -279,8 +279,8 @@ func amdgpuUpdateChroot(chroot string, spec *specs.Spec, conf *config.Config) er
 	if err := snap.Save(filepath.Join(chroot, amdgpu.Path)); err != nil {
 		return fmt.Errorf("saving AMD GPU sysfs snapshot: %w", err)
 	}
-	// The sentry opens /dev/kfd itself: KFD binds its process state to the
-	// opener's address space, so a gofer-opened descriptor would not do.
+	// KFD binds its context to the host process that opens this device.
+	// Application stubs open it after entering the sandbox chroot.
 	return mountInChroot(chroot, "/dev/kfd", "/dev/kfd", "bind", unix.MS_BIND)
 }
 

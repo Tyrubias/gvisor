@@ -15,21 +15,8 @@
 // Package amdgpuproxy implements /dev/kfd and /dev/dri/renderD* for AMD GPU
 // compute (ROCm) on top of the host's AMDGPU/KFD driver.
 //
-// As in nvproxy, the host driver is trusted to handle whatever an
-// unprivileged native process could ask of it. The proxy's job is to keep
-// application pointers and descriptors out of the sentry's address space:
-// ioctl arguments and their nested buffers are bounced through sentry memory,
-// USERPTR registrations pin application pages and register a sentry alias of
-// them, and ACQUIRE_VM's render node FD is translated.
-//
-// KFD binds its per-process state to the host address space that opened
-// /dev/kfd, so the sentry opens it itself (OpenKFD) and the proxy serves
-// exactly one application address space per sandbox.
-//
-// KFD hides the GPUs whose render node the device cgroup denies to a process.
-// The sentry is not subject to the container's device cgroup, so the proxy
-// stands in for it: apertures are filtered to the granted GPUs, and requests
-// naming other GPUs fail with EINVAL as they do natively.
+// Device operations execute in the application's host address space on systrap.
+// KFD descriptors retain the identity of the opening application process.
 package amdgpuproxy
 
 import (
@@ -49,36 +36,16 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
+	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
-// OpenKFD opens the host's /dev/kfd for Register. It must be called by the
-// process that runs the sentry, after any re-exec, because the driver binds
-// the KFD process to the opener's address space.
-func OpenKFD() (int, error) {
-	fd, err := unix.Open("/dev/kfd", unix.O_RDWR|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return -1, err
-	}
-	// With XNACK on, GPU page faults are resolved through SVM against the
-	// KFD process's address space, i.e. the sentry's. Turn it off before an
-	// application can use the GPU; SET_XNACK_MODE refuses to turn it back on.
-	v := amdgpu.KFDSetXNACKMode{XNACKEnabled: 0}
-	b := make([]byte, v.SizeBytes())
-	v.MarshalBytes(b)
-	if err := hostIoctl(int32(fd), amdgpu.AMDKFD_IOC_SET_XNACK_MODE, b); err != nil {
-		unix.Close(fd)
-		return -1, fmt.Errorf("disabling KFD XNACK: %w", err)
-	}
-	return fd, nil
-}
-
 // Register registers the granted devices. gpuIDs maps DRM render minors to
 // their KFD GPU IDs.
-func Register(vfsObj *vfs.VirtualFilesystem, kfdFD int, devices []hostamdgpu.Device, gpuIDs map[uint32]uint32) error {
-	p := &proxy{kfdFD: int32(kfdFD), gpus: make(map[uint32]bool), allocations: make(map[uint64]*allocation)}
+func Register(vfsObj *vfs.VirtualFilesystem, devices []hostamdgpu.Device, gpuIDs map[uint32]uint32) error {
+	p := &proxy{gpus: make(map[uint32]bool), contexts: make(map[platform.AddressSpace]*deviceContext)}
 	for _, d := range devices {
 		dev := &device{proxy: p, path: strings.TrimPrefix(d.Path, "/dev/"), kfd: d.Path == "/dev/kfd", gpuID: gpuIDs[d.Minor]}
 		if !dev.kfd {
@@ -96,17 +63,56 @@ func Register(vfsObj *vfs.VirtualFilesystem, kfdFD int, devices []hostamdgpu.Dev
 
 // +stateify savable
 type proxy struct {
-	kfdFD int32 `state:"nosave"`
-	// gpus holds the KFD GPU IDs of the granted render nodes.
 	gpus map[uint32]bool `state:"nosave"`
 
 	mu sync.Mutex `state:"nosave"`
-	// owner is the application address space using the GPUs. KFD keys its
-	// process state by the sentry's host address space, so no other
-	// application process can get a GPU context of its own.
-	owner *mm.MemoryManager `state:"nosave"`
-	// allocations maps KFD memory handles to live allocations.
-	allocations map[uint64]*allocation `state:"nosave"`
+	// +checklocks:mu
+	contexts map[platform.AddressSpace]*deviceContext `state:"nosave"`
+}
+
+type deviceContext struct {
+	proxy *proxy
+	owner *mm.MemoryManager
+	as    platform.AddressSpace
+
+	mu sync.Mutex
+	// +checklocks:mu
+	group *kernel.ThreadGroup
+	// +checklocks:mu
+	allocations map[uint64]*allocation
+}
+
+func (p *proxy) context(t *kernel.Task) (*deviceContext, error) {
+	as := t.MemoryManager().AddressSpace()
+	io, ok := as.(platform.HostDeviceIO)
+	if !ok {
+		return nil, linuxerr.EOPNOTSUPP
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c := p.contexts[as]; c != nil {
+		return c, nil
+	}
+	c := &deviceContext{proxy: p, owner: t.MemoryManager(), as: as, allocations: make(map[uint64]*allocation)}
+	if err := io.OnHostDeviceRelease(c.release); err != nil {
+		return nil, err
+	}
+	p.contexts[as] = c
+	return c, nil
+}
+
+func (c *deviceContext) release() {
+	c.proxy.mu.Lock()
+	delete(c.proxy.contexts, c.as)
+	c.proxy.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, a := range c.allocations {
+		if a.userptr != nil {
+			a.userptr.release()
+		}
+	}
+	c.allocations = nil
 }
 
 func (p *proxy) beforeSave() {
@@ -114,36 +120,21 @@ func (p *proxy) beforeSave() {
 }
 
 type allocation struct {
-	// mmapOffset and size locate the allocation's render node mapping; size
-	// is that of the backing buffer.
-	mmapOffset uint64
-	size       uint64
-	memType    hostarch.MemoryType
-	// userptr is the pinned application memory of a USERPTR allocation.
+	size    uint64
 	userptr *userMemory
 }
 
-func (p *proxy) checkOwner(t *kernel.Task) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.owner != t.MemoryManager() {
-		return linuxerr.EBUSY
+func (fd *deviceFD) checkOwner(t *kernel.Task) error {
+	if !fd.dev.kfd {
+		return nil
+	}
+	c := fd.context
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.owner != t.MemoryManager() || c.group != t.ThreadGroup() {
+		return linuxerr.EBADF
 	}
 	return nil
-}
-
-// memoryType returns the CPU memory type that the host driver uses for the
-// allocation at render node offset off: write-combined for VRAM and cached
-// for GTT (amdgpu_vram_mgr_new, amdgpu_ttm_tt_create).
-func (p *proxy) memoryType(off uint64) hostarch.MemoryType {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, a := range p.allocations {
-		if a.mmapOffset <= off && off < a.mmapOffset+a.size {
-			return a.memType
-		}
-	}
-	return hostarch.MemoryTypeUncached
 }
 
 // +stateify savable
@@ -162,16 +153,28 @@ func (d *device) Open(ctx context.Context, mnt *vfs.Mount, dent *vfs.Dentry, opt
 	if t == nil {
 		return nil, linuxerr.EINVAL
 	}
-	p := d.proxy
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.owner != nil && p.owner != t.MemoryManager() {
-		return nil, linuxerr.EBUSY
+	c, err := d.proxy.context(t)
+	if err != nil {
+		return nil, err
 	}
 	var hostFD int
-	var err error
 	if d.kfd {
-		hostFD, err = unix.Dup(int(p.kfdFD))
+		c.mu.Lock()
+		if c.group == nil {
+			c.group = t.ThreadGroup()
+		}
+		io := c.as.(platform.HostDeviceIO)
+		var opened int32
+		opened, err = io.OpenHostDevice("/dev/kfd", opts.Flags&(unix.O_ACCMODE|unix.O_NONBLOCK)|unix.O_CLOEXEC)
+		if err == nil {
+			// Retry faults must not resolve against platform-private VMAs.
+			var mode [4]byte
+			if _, err = io.IoctlHostDevice(opened, amdgpu.AMDKFD_IOC_SET_XNACK_MODE, mode[:]); err != nil {
+				_ = unix.Close(int(opened))
+			}
+		}
+		c.mu.Unlock()
+		hostFD = int(opened)
 	} else {
 		client := devutil.GoferClientFromContext(ctx)
 		if client == nil {
@@ -182,17 +185,13 @@ func (d *device) Open(ctx context.Context, mnt *vfs.Mount, dent *vfs.Dentry, opt
 	if err != nil {
 		return nil, err
 	}
-	fd := &deviceFD{dev: d, hostFD: int32(hostFD)}
+	fd := &deviceFD{dev: d, context: c, hostFD: int32(hostFD)}
 	if err := fd.vfsfd.Init(fd, opts.Flags, auth.CredentialsFromContext(ctx), mnt, dent, &vfs.FileDescriptionOptions{UseDentryMetadata: true, SpecialFile: true}); err != nil {
 		unix.Close(hostFD)
 		return nil, err
 	}
 	fd.memmapFile.SetFD(hostFD)
 	fd.memmapFile.SetMemType(hostarch.MemoryTypeUncached)
-	for i := range fd.memTypeFiles {
-		fd.memTypeFiles[i] = memTypeFile{&fd.memmapFile, hostarch.MemoryType(i)}
-	}
-	p.owner = t.MemoryManager()
 	return &fd.vfsfd, nil
 }
 
@@ -205,24 +204,10 @@ type deviceFD struct {
 	memmap.MappableNoTrackMappings
 	memmap.MappableNoHugepages
 
-	dev    *device
-	hostFD int32 `state:"nosave"`
-	// memmapFile caches host mappings of the device. Its own memory type,
-	// uncached, is used for KFD mappings (doorbells and MMIO); render node
-	// mappings use the allocation's type through memTypeFiles.
-	memmapFile   fsutil.MmapPreciseFile
-	memTypeFiles [hostarch.NumMemoryTypes]memTypeFile `state:"nosave"`
-}
-
-// memTypeFile is memmapFile with a different memory type.
-type memTypeFile struct {
-	*fsutil.MmapPreciseFile
-	memType hostarch.MemoryType
-}
-
-// MemoryType implements memmap.File.MemoryType.
-func (f *memTypeFile) MemoryType() hostarch.MemoryType {
-	return f.memType
+	dev        *device
+	context    *deviceContext `state:"nosave"`
+	hostFD     int32          `state:"nosave"`
+	memmapFile fsutil.MmapPreciseFile
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
@@ -236,7 +221,7 @@ func (fd *deviceFD) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, ar
 	if t == nil {
 		panic("Ioctl should be called from a task context")
 	}
-	if err := fd.dev.proxy.checkOwner(t); err != nil {
+	if err := fd.checkOwner(t); err != nil {
 		return 0, err
 	}
 	cmd, addr := args[1].Uint(), args[2].Pointer()
@@ -258,7 +243,7 @@ func (fd *deviceFD) ConfigureMMap(ctx context.Context, opts *memmap.MMapOpts) er
 	if t == nil {
 		return linuxerr.EINVAL
 	}
-	if err := fd.dev.proxy.checkOwner(t); err != nil {
+	if err := fd.checkOwner(t); err != nil {
 		return err
 	}
 	if gpu := uint32((opts.Offset & amdgpu.KFD_MMAP_GPU_ID_MASK) >> amdgpu.KFD_MMAP_GPU_ID_SHIFT); fd.dev.kfd && gpu != 0 && !fd.dev.proxy.gpus[gpu] {
@@ -270,6 +255,7 @@ func (fd *deviceFD) ConfigureMMap(ctx context.Context, opts *memmap.MMapOpts) er
 		opts.PlatformEffect = memmap.PlatformEffectPopulate
 	}
 	opts.RequirePlatformEffect = true
+	opts.DontFork = fd.dev.kfd
 	opts.Mappable = fd
 	opts.MappingIdentity = &fd.vfsfd
 	fd.vfsfd.IncRef()
@@ -278,9 +264,5 @@ func (fd *deviceFD) ConfigureMMap(ctx context.Context, opts *memmap.MMapOpts) er
 
 // Translate implements memmap.Mappable.Translate.
 func (fd *deviceFD) Translate(ctx context.Context, required, optional memmap.MappableRange, at hostarch.AccessType) ([]memmap.Translation, error) {
-	var f memmap.File = &fd.memmapFile
-	if !fd.dev.kfd {
-		f = &fd.memTypeFiles[fd.dev.proxy.memoryType(optional.Start)]
-	}
-	return []memmap.Translation{{Source: optional, File: f, Offset: optional.Start, Perms: hostarch.AnyAccess}}, nil
+	return []memmap.Translation{{Source: optional, File: &fd.memmapFile, Offset: optional.Start, Perms: hostarch.AnyAccess}}, nil
 }

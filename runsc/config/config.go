@@ -602,8 +602,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("--platform=%s accepts only --platform_device_path={platform}={path}[,{platform}={path}...], got %q", PlatformAuto, c.PlatformDevicePath)
 	}
 
-	if c.AMDGPUProxy != AMDGPUProxyDisabled && c.Platform != "kvm" {
-		return fmt.Errorf("--amdgpuproxy=%v requires --platform=kvm", c.AMDGPUProxy)
+	if c.AMDGPUProxy != AMDGPUProxyDisabled && c.Platform != "systrap" {
+		return fmt.Errorf("--amdgpuproxy=%v requires --platform=systrap", c.AMDGPUProxy)
 	}
 	if c.Overlay && c.Overlay2.Enabled() {
 		// Deprecated flag was used together with flag that replaced it.

@@ -418,6 +418,9 @@ type MMapOpts struct {
 	// backing the mapping and unmaps the pages from the platform.AddressSpace.
 	EagerForkCopy bool
 
+	// DontFork excludes the mapping from a forked address space.
+	DontFork bool
+
 	// If Sealed is true, the application may not unmap, remap, change the
 	// protections of, discard the contents of, madvise, or map over the
 	// mapping. Attempts to do so fail with EPERM. This is reserved for

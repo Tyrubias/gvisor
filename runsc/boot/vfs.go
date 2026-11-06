@@ -102,7 +102,7 @@ func cgroupfsMemoryDefaults(memoryLimit uint64) map[string]int64 {
 	}
 }
 
-func registerFilesystems(k *kernel.Kernel, info *containerInfo, rdmaSnapshot *rdma.Snapshot, amdgpuSnapshot *amdgpu.Snapshot, amdKFDFD int) error {
+func registerFilesystems(k *kernel.Kernel, info *containerInfo, rdmaSnapshot *rdma.Snapshot, amdgpuSnapshot *amdgpu.Snapshot) error {
 	ctx := k.SupervisorContext()
 	vfsObj := k.VFS()
 
@@ -177,7 +177,7 @@ func registerFilesystems(k *kernel.Kernel, info *containerInfo, rdmaSnapshot *rd
 		if amdgpuSnapshot == nil {
 			return fmt.Errorf("AMD GPU sysfs snapshot missing")
 		}
-		if err := amdgpuproxy.Register(vfsObj, amdKFDFD, specutils.AMDGPUDevicesInSpec(info.spec), amdgpuSnapshot.GPUIDs); err != nil {
+		if err := amdgpuproxy.Register(vfsObj, specutils.AMDGPUDevicesInSpec(info.spec), amdgpuSnapshot.GPUIDs); err != nil {
 			return fmt.Errorf("registering AMD GPU devices: %w", err)
 		}
 	}
