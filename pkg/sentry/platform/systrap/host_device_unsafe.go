@@ -237,6 +237,8 @@ func (s *subprocess) initHostDeviceScratch() error {
 }
 
 func (s *subprocess) releaseHostDeviceScratch() {
+	s.syscallThreadMu.Lock()
+	defer s.syscallThreadMu.Unlock()
 	for _, cleanup := range s.hostDeviceCleanups {
 		cleanup()
 	}

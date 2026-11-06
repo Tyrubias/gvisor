@@ -66,6 +66,8 @@ type sysfsDirs struct {
 	busPCIDrivers map[string]kernfs.Inode
 	// devChar contains the /sys/dev/char symlinks.
 	devChar map[string]kernfs.Inode
+	// module contains the /sys/module entries.
+	module map[string]kernfs.Inode
 }
 
 // dirTree is the intermediate mutable representation, keyed by entry name.

@@ -30,7 +30,7 @@ import (
 func (fs *filesystem) newAMDGPUSysfs(ctx context.Context, creds *auth.Credentials, snap *amdgpu.Snapshot, hostNodes []uint32) (*sysfsDirs, error) {
 	root := newDirTree()
 	parent := func(p string) (*dirTree, string, error) {
-		if !strings.HasPrefix(p, "devices/") && !strings.HasPrefix(p, "class/") && !strings.HasPrefix(p, "bus/pci/") && !strings.HasPrefix(p, "dev/char/") {
+		if !strings.HasPrefix(p, "devices/") && !strings.HasPrefix(p, "class/") && !strings.HasPrefix(p, "bus/pci/") && !strings.HasPrefix(p, "dev/char/") && !strings.HasPrefix(p, "module/amdgpu/") {
 			return nil, "", fmt.Errorf("unexpected AMD GPU sysfs path %q", p)
 		}
 		for _, part := range strings.Split(p, "/") {
@@ -76,5 +76,6 @@ func (fs *filesystem) newAMDGPUSysfs(ctx context.Context, creds *auth.Credential
 		busPCIDevices: fs.dirTreeEntries(ctx, creds, root.get("bus/pci/devices")),
 		busPCIDrivers: fs.dirTreeEntries(ctx, creds, root.get("bus/pci/drivers")),
 		devChar:       fs.dirTreeEntries(ctx, creds, root.get("dev/char")),
+		module:        fs.dirTreeEntries(ctx, creds, root.get("module")),
 	}, nil
 }

@@ -120,10 +120,12 @@ func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar host
 	// Limit mapping to ar: remapping an adjacent device VMA can destroy state
 	// maintained by its driver. Mapping whole PMAs, rather than faulting one
 	// page at a time, also avoids per-page host mmap calls for resident memory.
-	return mm.mapASLocked(ctx, mm.pmas.LowerBoundSegment(ar.Start), ar, memmap.PlatformEffectPopulate)
+	return mm.mapASLocked(ctx, mm.pmas.LowerBoundSegment(ar.Start), ar, memmap.PlatformEffectPopulate, false /* singleMap */)
 }
 
-// mapASLocked maps addresses in ar into mm.as.
+// mapASLocked maps addresses in ar into mm.as. If singleMap is true, each
+// PMA is mapped with one platform call, even when it exceeds the normal chunk
+// size. Some host devices require a complete buffer mapping.
 //
 // Preconditions:
 //   - ar.Length() != 0.
@@ -131,7 +133,7 @@ func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar host
 //   - pseg == mm.pmas.LowerBoundSegment(ar.Start).
 //
 // +checklocksread:mm.activeMu
-func (mm *MemoryManager) mapASLocked(ctx context.Context, pseg pmaIterator, ar hostarch.AddrRange, platformEffect memmap.MMapPlatformEffect) error {
+func (mm *MemoryManager) mapASLocked(ctx context.Context, pseg pmaIterator, ar hostarch.AddrRange, platformEffect memmap.MMapPlatformEffect, singleMap bool) error {
 	if platformEffect == memmap.PlatformEffectCommit && ar.Length() > (1<<30) {
 		// FIXME(b/445932215, b/445939339): Don't precommit very large ranges
 		// via platform.AddressSpace.MapFile() for now, since holding locks
@@ -182,7 +184,7 @@ func (mm *MemoryManager) mapASLocked(ctx context.Context, pseg pmaIterator, ar h
 			// AddressSpace.MapFile() on singleMapThreshold-aligned chunks so
 			// we can check ctx.Killed() reasonably frequently.
 			const singleMapThreshold = 1 << 30
-			if pmaMapAR.Length() <= singleMapThreshold {
+			if singleMap || pmaMapAR.Length() <= singleMapThreshold {
 				if err := mm.as.MapFile(pmaMapAR.Start, pma.file, pseg.fileRangeOf(pmaMapAR), perms, platformEffect == memmap.PlatformEffectCommit); err != nil {
 					return err
 				}

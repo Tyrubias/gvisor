@@ -19,7 +19,6 @@
 #include <unistd.h>
 
 #include <cstdint>
-#include <thread>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -28,6 +27,7 @@
 #include "test/util/multiprocess_util.h"
 #include "test/util/posix_error.h"
 #include "test/util/test_util.h"
+#include "test/util/thread_util.h"
 
 namespace gvisor {
 namespace testing {
@@ -47,13 +47,13 @@ TEST(KFDTest, ProcessOwnership) {
   KFDVersion version = {};
   ASSERT_THAT(ioctl(fd.get(), kGetVersion, &version), SyscallSucceeds());
 
-  std::thread thread([&] {
+  ScopedThread thread([&] {
     KFDVersion other = {};
     EXPECT_THAT(ioctl(fd.get(), kGetVersion, &other), SyscallSucceeds());
     EXPECT_EQ(other.major, version.major);
     EXPECT_EQ(other.minor, version.minor);
   });
-  thread.join();
+  thread.Join();
 
   for (int i = 0; i < 2; ++i) {
     EXPECT_THAT(InForkedProcess([&] {

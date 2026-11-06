@@ -45,7 +45,7 @@ import (
 // Register registers the granted devices. gpuIDs maps DRM render minors to
 // their KFD GPU IDs.
 func Register(vfsObj *vfs.VirtualFilesystem, devices []hostamdgpu.Device, gpuIDs map[uint32]uint32) error {
-	p := &proxy{gpus: make(map[uint32]bool), contexts: make(map[platform.AddressSpace]*deviceContext)}
+	p := &proxy{gpus: make(map[uint32]bool), contexts: make(map[platform.AddressSpace]*deviceContext), ipcHandles: make(map[amdgpu.KFDIPCShareHandle]uint64)}
 	for _, d := range devices {
 		dev := &device{proxy: p, path: strings.TrimPrefix(d.Path, "/dev/"), kfd: d.Path == "/dev/kfd", gpuID: gpuIDs[d.Minor]}
 		if !dev.kfd {
@@ -68,6 +68,9 @@ type proxy struct {
 	mu sync.Mutex `state:"nosave"`
 	// +checklocks:mu
 	contexts map[platform.AddressSpace]*deviceContext `state:"nosave"`
+	// ipcHandles records trusted exports and their allocation sizes.
+	// +checklocks:mu
+	ipcHandles map[amdgpu.KFDIPCShareHandle]uint64 `state:"nosave"`
 }
 
 type deviceContext struct {

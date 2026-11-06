@@ -50,3 +50,39 @@ type DRMAMDGPUInfo struct {
 	Query         uint32
 	QueryData     [4]uint32
 }
+
+// DRM sharing and buffer management ioctl requests. GEM_OP and GEM_VA use
+// the original argument sizes, which remain supported by current drivers.
+const (
+	DRM_IOCTL_GEM_CLOSE               = 0x40086409
+	DRM_IOCTL_PRIME_HANDLE_TO_FD      = 0xc00c642d
+	DRM_IOCTL_PRIME_FD_TO_HANDLE      = 0xc00c642e
+	DRM_IOCTL_SYNCOBJ_CREATE          = 0xc00864bf
+	DRM_IOCTL_SYNCOBJ_DESTROY         = 0xc00864c0
+	DRM_IOCTL_AMDGPU_GEM_MMAP         = 0xc0086441
+	DRM_IOCTL_AMDGPU_GEM_METADATA     = 0xc1206446
+	DRM_IOCTL_AMDGPU_GEM_VA           = 0x40286448
+	DRM_IOCTL_AMDGPU_GEM_OP           = 0xc0106450
+	AMDGPU_GEM_OP_GET_GEM_CREATE_INFO = 0
+	AMDGPU_GEM_OP_SET_PLACEMENT       = 1
+)
+
+// DRMPrimeHandle is struct drm_prime_handle.
+//
+// +marshal
+type DRMPrimeHandle struct {
+	_      structs.HostLayout
+	Handle uint32
+	Flags  uint32
+	FD     int32
+}
+
+// DRMAMDGPUOp is the original struct drm_amdgpu_gem_op.
+//
+// +marshal
+type DRMAMDGPUOp struct {
+	_      structs.HostLayout
+	Handle uint32
+	Op     uint32
+	Value  uint64
+}

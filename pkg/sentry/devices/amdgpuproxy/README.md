@@ -56,6 +56,18 @@ The sandbox's `/sys` contains a snapshot of KFD topology and the PCI identity
 of the granted render nodes. ROCm filters topology nodes by opening their
 render devices, as it does with native device cgroups.
 
+## Sharing
+
+KFD legacy IPC imports accept only handles captured from exports inside the
+sandbox. The registry covers all application processes and granted GPUs.
+A driver import still enforces the exported allocation's native lifetime.
+
+KFD and DRM PRIME dma-buf exports create guest file descriptions. Imports
+translate only those file descriptions from the same sandbox. Descriptor
+passing over a Unix socket preserves the file object's identity and lifetime.
+The host descriptor table is shared by systrap stubs, so the same host
+reference is available in the receiving process without a duplicate.
+
 ## Current limitations
 
 The compute path requires these ROCm settings:
@@ -65,7 +77,6 @@ HSA_ENABLE_SDMA=0 HSA_USE_SVM=0 HSA_XNACK=0
 HIP_MEM_POOL_USE_VM=0 DEBUG_HIP_MEM_POOL_VMHEAP=0 HIP_VMEM_MANAGE_SUPPORT=0
 ```
 
-GPU IPC, dma-buf sharing, SDMA, SVM, and checkpoint/restore are not yet
-supported. Event waits remain interruptible; wait-for-all on multiple events
-is rejected. The application must have a writable temporary directory for
+SDMA, SVM, and checkpoint/restore are not yet supported. Event waits remain
+interruptible; wait-for-all on multiple events is rejected. The application must have a writable temporary directory for
 ROCm code loading.

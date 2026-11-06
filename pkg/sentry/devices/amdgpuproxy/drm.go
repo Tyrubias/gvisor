@@ -16,6 +16,7 @@ package amdgpuproxy
 
 import (
 	"gvisor.dev/gvisor/pkg/abi/amdgpu"
+	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -29,6 +30,20 @@ func (fd *deviceFD) drmIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) err
 	switch cmd {
 	case amdgpu.DRM_IOCTL_VERSION:
 		return fd.drmVersion(t, addr)
+	case amdgpu.DRM_IOCTL_GEM_CLOSE,
+		amdgpu.DRM_IOCTL_SYNCOBJ_CREATE,
+		amdgpu.DRM_IOCTL_SYNCOBJ_DESTROY,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_MMAP,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_METADATA,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA:
+		// These argument versions contain per-file handles and scalars.
+		return fd.passthrough(t, cmd, addr)
+	case amdgpu.DRM_IOCTL_PRIME_HANDLE_TO_FD:
+		return fd.primeHandleToFD(t, addr)
+	case amdgpu.DRM_IOCTL_PRIME_FD_TO_HANDLE:
+		return fd.primeFDToHandle(t, addr)
+	case amdgpu.DRM_IOCTL_AMDGPU_GEM_OP:
+		return fd.gemOp(t, addr)
 	case amdgpu.DRM_IOCTL_AMDGPU_INFO:
 		return fd.drmInfo(t, addr)
 	default:
@@ -87,4 +102,81 @@ func (fd *deviceFD) drmInfo(t *kernel.Task, addr hostarch.Addr) error {
 	}
 	_, err := t.CopyOutBytes(ptr, out)
 	return err
+}
+
+func (fd *deviceFD) primeHandleToFD(t *kernel.Task, addr hostarch.Addr) error {
+	const cmd = amdgpu.DRM_IOCTL_PRIME_HANDLE_TO_FD
+	var v amdgpu.DRMPrimeHandle
+	if _, err := v.CopyIn(t, addr); err != nil {
+		return err
+	}
+	if v.Flags & ^uint32(3) != 0 {
+		return linuxerr.EINVAL
+	}
+	if err := fd.call(t, cmd, &v); err != nil {
+		return err
+	}
+	// DRM_CLOEXEC and DRM_RDWR are 1 and 2, respectively.
+	flags := uint32(linux.O_RDONLY)
+	if v.Flags&1 != 0 {
+		flags |= linux.O_CLOEXEC
+	}
+	if v.Flags&2 != 0 {
+		flags |= linux.O_RDWR
+	}
+	guestFD, err := fd.dev.proxy.newDMABufFD(t, v.FD, flags)
+	if err != nil {
+		return err
+	}
+	v.FD = guestFD
+	if _, err := v.CopyOut(t, addr); err != nil {
+		removeFD(t, guestFD)
+		return err
+	}
+	return nil
+}
+
+func (fd *deviceFD) primeFDToHandle(t *kernel.Task, addr hostarch.Addr) error {
+	const cmd = amdgpu.DRM_IOCTL_PRIME_FD_TO_HANDLE
+	var v amdgpu.DRMPrimeHandle
+	if _, err := v.CopyIn(t, addr); err != nil {
+		return err
+	}
+	f, hostFD, err := fd.dev.proxy.getDMABufFD(t, v.FD)
+	if err != nil {
+		return err
+	}
+	defer f.DecRef(t)
+	guestFD := v.FD
+	v.FD = hostFD
+	err = fd.call(t, cmd, &v)
+	v.FD = guestFD
+	return copyOut(t, cmd, addr, &v, err)
+}
+
+func (fd *deviceFD) gemOp(t *kernel.Task, addr hostarch.Addr) error {
+	const cmd = amdgpu.DRM_IOCTL_AMDGPU_GEM_OP
+	var v amdgpu.DRMAMDGPUOp
+	if _, err := v.CopyIn(t, addr); err != nil {
+		return err
+	}
+	switch v.Op {
+	case amdgpu.AMDGPU_GEM_OP_GET_GEM_CREATE_INFO:
+		// The output is union drm_amdgpu_gem_create: four 64-bit scalars.
+		out := make([]byte, 32)
+		ptr := v.Value
+		v.Value = hostBufferPointer(out)
+		if err := fd.call(t, cmd, &v, platform.HostIoctlBuffer{PointerOffset: 8, Data: out}); err != nil {
+			return err
+		}
+		v.Value = ptr
+		if _, err := t.CopyOutBytes(hostarch.Addr(ptr), out); err != nil {
+			return err
+		}
+		return copyOut(t, cmd, addr, &v, nil)
+	case amdgpu.AMDGPU_GEM_OP_SET_PLACEMENT:
+		return copyOut(t, cmd, addr, &v, fd.call(t, cmd, &v))
+	default:
+		return linuxerr.EINVAL
+	}
 }

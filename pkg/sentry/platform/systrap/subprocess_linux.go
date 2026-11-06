@@ -75,8 +75,9 @@ func attachedThread(flags uintptr, ioctlRules seccomp.SyscallRule, hostDeviceIO 
 		program.RuleSets[0].Rules.Add(unix.SYS_IOCTL, ioctlRules)
 	}
 	if hostDeviceIO {
+		dirFD := int32(unix.AT_FDCWD)
 		program.RuleSets[0].Rules.Add(unix.SYS_OPENAT, seccomp.PerArg{
-			seccomp.EqualTo(uintptr(0xffffffffffffff9c)),
+			seccomp.EqualTo(uintptr(dirFD)),
 			seccomp.AnyValue{},
 			seccomp.BitsAllowlist(unix.O_ACCMODE | unix.O_CLOEXEC | unix.O_NONBLOCK),
 			seccomp.EqualTo(0),

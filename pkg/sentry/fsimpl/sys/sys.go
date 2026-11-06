@@ -152,6 +152,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	pciDevices := make(map[string]kernfs.Inode) // /sys/bus/pci/devices
 	pciDrivers := make(map[string]kernfs.Inode) // /sys/bus/pci/drivers
 	charDevices := make(map[string]kernfs.Inode)
+	moduleSub := make(map[string]kernfs.Inode)
 	kernelSub := kernelDir(ctx, fs, creds) // /sys/kernel
 	if opts.InternalData != nil {
 		idata := opts.InternalData.(*InternalData)
@@ -226,6 +227,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 			maps.Copy(pciDevices, dirs.busPCIDevices)
 			maps.Copy(pciDrivers, dirs.busPCIDrivers)
 			maps.Copy(charDevices, dirs.devChar)
+			maps.Copy(moduleSub, dirs.module)
 		}
 		if virtual, ok := devicesTree.children["virtual"]; ok {
 			maps.Copy(virtualSub, fs.dirTreeEntries(ctx, creds, virtual))
@@ -272,7 +274,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		"firmware": fs.newDir(ctx, creds, defaultSysDirMode, nil),
 		"fs":       fs.newDir(ctx, creds, defaultSysDirMode, fsDirChildren),
 		"kernel":   fs.newDir(ctx, creds, defaultSysDirMode, kernelSub),
-		"module":   fs.newDir(ctx, creds, defaultSysDirMode, nil),
+		"module":   fs.newDir(ctx, creds, defaultSysDirMode, moduleSub),
 		"power":    fs.newDir(ctx, creds, defaultSysDirMode, nil),
 	})
 	fs.root = root.(*dir)

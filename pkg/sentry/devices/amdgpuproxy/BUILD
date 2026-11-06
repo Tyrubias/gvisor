@@ -8,10 +8,12 @@ go_library(
     name = "amdgpuproxy",
     srcs = [
         "amdgpuproxy.go",
+        "dmabuf.go",
         "drm.go",
         "ioctl_unsafe.go",
         "kfd.go",
         "seccomp_filters.go",
+        "sharing.go",
     ],
     visibility = ["//pkg/sentry:internal"],
     deps = [

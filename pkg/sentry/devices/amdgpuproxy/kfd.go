@@ -125,6 +125,16 @@ func (fd *deviceFD) kfdIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) err
 		return fd.freeMemory(t, addr)
 	case amdgpu.AMDKFD_IOC_MAP_MEMORY_TO_GPU, amdgpu.AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU:
 		return fd.mapMemory(t, cmd, addr)
+	case amdgpu.AMDKFD_IOC_EXPORT_DMABUF:
+		return fd.exportDMABuf(t, addr)
+	case amdgpu.AMDKFD_IOC_IMPORT_DMABUF:
+		return fd.importDMABuf(t, addr)
+	case amdgpu.AMDKFD_IOC_GET_DMABUF_INFO:
+		return fd.getDMABufInfo(t, addr)
+	case amdgpu.AMDKFD_IOC_IPC_EXPORT_HANDLE:
+		return fd.exportIPC(t, addr)
+	case amdgpu.AMDKFD_IOC_IPC_IMPORT_HANDLE:
+		return fd.importIPC(t, addr)
 	case amdgpu.AMDKFD_IOC_WAIT_EVENTS:
 		return fd.waitEvents(t, addr)
 	default:
@@ -156,16 +166,18 @@ func (fd *deviceFD) createEvent(t *kernel.Task, addr hostarch.Addr) error {
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
+	p := fd.context
+	p.mu.Lock()
 	if v.EventPageOffset != 0 {
-		p := fd.context
-		p.mu.Lock()
 		a := p.allocations[v.EventPageOffset]
-		p.mu.Unlock()
 		if a == nil || a.size < amdgpu.KFD_SIGNAL_EVENT_LIMIT*8 {
+			p.mu.Unlock()
 			return linuxerr.EINVAL
 		}
 	}
-	return copyOut(t, cmd, addr, &v, fd.call(t, cmd, &v))
+	err := fd.call(t, cmd, &v)
+	p.mu.Unlock()
+	return copyOut(t, cmd, addr, &v, err)
 }
 
 func (fd *deviceFD) setXNACKMode(t *kernel.Task, addr hostarch.Addr) error {
@@ -233,7 +245,7 @@ func (fd *deviceFD) acquireVM(t *kernel.Task, addr hostarch.Addr) error {
 	}
 	defer f.DecRef(t)
 	render, ok := f.Impl().(*deviceFD)
-	if !ok || render.dev.kfd || render.dev.gpuID != v.GPUID {
+	if !ok || render.dev.kfd || render.dev.proxy != fd.dev.proxy || render.dev.gpuID != v.GPUID {
 		return linuxerr.EINVAL
 	}
 	v.DRMFD = uint32(render.hostFD)

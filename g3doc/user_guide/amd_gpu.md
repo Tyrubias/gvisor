@@ -11,9 +11,9 @@ to the container. ROCm userspace runs unmodified inside the sandbox. gVisor also
 reproduces the host's KFD topology under `/sys`, so ROCm's device discovery
 behaves the same inside the sandbox as on the host.
 
-AMD GPU support is **experimental**. It has been validated with HIP and PyTorch
-workloads on MI300X (gfx942) and MI350X/MI355X (gfx950) GPUs, and `runsc` refuses
-other GPU models. For NVIDIA GPUs, see [NVIDIA GPU Support](gpu.md).
+AMD GPU support is **experimental**. The proxy admits MI300X (gfx942) and
+MI350X/MI355X (gfx950) GPUs. Multi-process HIP, IPC, PyTorch, and SGLang serving
+have been validated on an MI350X. For NVIDIA GPUs, see [NVIDIA GPU Support](gpu.md).
 
 ## Enabling AMD GPU support
 
@@ -53,7 +53,31 @@ AMD Instinct MI300X
 ```
 
 Granting several render nodes exposes several GPUs to the same application;
-peer-to-peer copies between them are supported.
+the proxy validates each GPU in mapping and sharing requests. Multi-GPU
+hardware validation is still required.
+
+## Interprocess sharing
+
+Applications can export and import GPU memory through dma-buf descriptors or
+legacy KFD IPC handles. Unix socket descriptor passing retains each dma-buf's
+ownership and lifetime. Legacy IPC imports accept only handles exported inside
+the sandbox. Neither interface permits importing an unrelated host allocation.
+
+## SGLang
+
+SGLang `v0.5.23-rocm10-mi35x` can serve `Qwen/Qwen2.5-7B-Instruct` with the
+ROCm environment above. Grant the KFD device and the GPU's render node, provide
+a writable temporary directory and shared memory, and run:
+
+```
+python3 -m sglang.launch_server \
+    --model-path /models/Qwen2.5-7B-Instruct \
+    --attention-backend triton --disable-cuda-graph \
+    --mem-fraction-static 0.2 --context-length 4096 --max-running-requests 4
+```
+
+The model directory must contain the downloaded weights. This configuration
+has been checked with concurrent requests to `/v1/chat/completions`.
 
 ## Limitations
 
@@ -61,8 +85,8 @@ peer-to-peer copies between them are supported.
     in the application's host address space. Multiple processes can use the
     GPU concurrently. Forked children must open their own KFD descriptor.
 *   **Unsupported ROCm features.** Shared virtual memory (SVM) and XNACK retry
-    faults, SDMA engines, DMA-BUF export and import, GPU IPC, the runtime
-    debugger, and checkpoint/restore are not supported. `hipMallocManaged()`
+    faults, SDMA engines, the runtime debugger, and checkpoint/restore are not
+    supported. `hipMallocManaged()`
     works through ROCm's non-SVM path, that is without GPU page migration.
 *   **Supported GPUs.** Only gfx942 (MI300) and gfx950 (MI355) GPUs are
     admitted, on the AMDGPU/KFD driver versions they were validated with. Other
@@ -72,7 +96,7 @@ peer-to-peer copies between them are supported.
 
 `amdgpuproxy` follows the same model as `nvproxy`; the
 [discussion of GPU security](gpu.md#security) applies. The proxy forwards a
-fixed set of 21 KFD and DRM `ioctl`s, mirrored in the sandbox's seccomp filter,
+fixed set of KFD and DRM `ioctl`s, mirrored in the sandbox's seccomp filter,
 and the host driver is trusted to handle those requests as it would for any
 unprivileged native process. The proxy's own job is to keep the application's
 pointers and file descriptors out of the sentry's address space: `ioctl`

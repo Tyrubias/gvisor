@@ -256,3 +256,76 @@ type KFDSetXNACKMode struct {
 	_            structs.HostLayout
 	XNACKEnabled int32
 }
+
+// KFD dma-buf and legacy IPC ioctl requests.
+const (
+	AMDKFD_IOC_GET_DMABUF_INFO   = 0xc0204b1c
+	AMDKFD_IOC_IMPORT_DMABUF     = 0xc0184b1d
+	AMDKFD_IOC_EXPORT_DMABUF     = 0xc0104b24
+	AMDKFD_IOC_IPC_IMPORT_HANDLE = 0xc0304b80
+	AMDKFD_IOC_IPC_EXPORT_HANDLE = 0xc0204b81
+)
+
+// KFDGetDMABufInfo is struct kfd_ioctl_get_dmabuf_info_args.
+//
+// +marshal
+type KFDGetDMABufInfo struct {
+	_            structs.HostLayout
+	Size         uint64
+	MetadataPtr  uint64
+	MetadataSize uint32
+	GPUID        uint32
+	Flags        uint32
+	DMABufFD     uint32
+}
+
+// KFDImportDMABuf is struct kfd_ioctl_import_dmabuf_args.
+//
+// +marshal
+type KFDImportDMABuf struct {
+	_        structs.HostLayout
+	VAAddr   uint64
+	Handle   uint64
+	GPUID    uint32
+	DMABufFD uint32
+}
+
+// KFDExportDMABuf is struct kfd_ioctl_export_dmabuf_args.
+//
+// +marshal
+type KFDExportDMABuf struct {
+	_        structs.HostLayout
+	Handle   uint64
+	Flags    uint32
+	DMABufFD uint32
+}
+
+// KFDIPCShareHandle is the opaque share token for legacy KFD IPC.
+//
+// +marshal
+type KFDIPCShareHandle [4]uint32
+
+// KFDIPCExportHandle is struct kfd_ioctl_ipc_export_handle_args. Legacy IPC
+// is an extension of the AMD packaged driver ABI.
+//
+// +marshal
+type KFDIPCExportHandle struct {
+	_           structs.HostLayout
+	Handle      uint64
+	ShareHandle KFDIPCShareHandle
+	GPUID       uint32
+	Flags       uint32
+}
+
+// KFDIPCImportHandle is struct kfd_ioctl_ipc_import_handle_args.
+//
+// +marshal
+type KFDIPCImportHandle struct {
+	_           structs.HostLayout
+	Handle      uint64
+	VAAddr      uint64
+	MmapOffset  uint64
+	ShareHandle KFDIPCShareHandle
+	GPUID       uint32
+	Flags       uint32
+}

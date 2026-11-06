@@ -47,6 +47,9 @@ func writeTestSysfs(t *testing.T, version string) string {
 			t.Fatal(err)
 		}
 	}
+	write("module/amdgpu/initstate", "live\n")
+	write("module/amdgpu/version", "7.1.3\n")
+	write("module/amdgpu/parameters/secret", "not reproduced\n")
 	write("devices/virtual/kfd/kfd/dev", "510:0\n")
 	write("devices/virtual/kfd/kfd/uevent", "MAJOR=510\nMINOR=0\nDEVNAME=kfd\n")
 	write("devices/virtual/kfd/kfd/proc/1234/pasid", "secret\n")
@@ -87,6 +90,8 @@ func TestCollect(t *testing.T) {
 	}
 	const top = "devices/virtual/kfd/kfd/topology"
 	for p, want := range map[string]string{
+		"module/amdgpu/initstate":                            "live\n",
+		"module/amdgpu/version":                              "7.1.3\n",
 		top + "/nodes/0/properties":                          "cpu_cores_count 8\nsimd_count 0\ncapability 0\n",
 		top + "/nodes/1/properties":                          "simd_count 304\ndrm_render_minor 128\ngfx_target_version 90402\ncapability 1\n",
 		top + "/nodes/2/gpu_id":                              "456\n",
@@ -116,7 +121,7 @@ func TestCollect(t *testing.T) {
 		}
 	}
 	for p := range snap.Files {
-		if strings.Contains(p, "/proc/") || strings.Contains(p, "resource0") || strings.Contains(p, "0000:02:00.0") {
+		if strings.Contains(p, "/proc/") || strings.Contains(p, "resource0") || strings.Contains(p, "0000:02:00.0") || strings.Contains(p, "module/amdgpu/parameters") {
 			t.Errorf("unexpected file %q", p)
 		}
 	}

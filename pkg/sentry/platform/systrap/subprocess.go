@@ -175,15 +175,15 @@ type subprocess struct {
 	// hostDeviceMu excludes new sysmsg threads during protected device operations.
 	hostDeviceMu sync.RWMutex
 
+	syscallThreadMu sync.Mutex
+	syscallThread   *syscallThread
+
 	// +checklocks:syscallThreadMu
 	hostDeviceScratchAddr uintptr
 	// +checklocks:syscallThreadMu
 	hostDeviceScratchRange memmap.FileRange
 	// +checklocks:syscallThreadMu
 	hostDeviceCleanups []func()
-
-	syscallThreadMu sync.Mutex
-	syscallThread   *syscallThread
 
 	// sysmsgThreadsMu protects sysmsgThreads
 	sysmsgThreadsMu sync.RWMutex

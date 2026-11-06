@@ -403,7 +403,8 @@ type MMapOpts struct {
 	// PlatformEffect is PlatformEffectDefault, RequirePlatformEffect is
 	// ignored.) This requirement is retained by the MemoryManager to
 	// conservatively reject later population that could replace host-device
-	// mappings with driver-specific mmap semantics.
+	// mappings with driver-specific mmap semantics. Initial population maps
+	// each backing range with a single platform operation.
 	RequirePlatformEffect bool
 
 	// SentryOwnedContent indicates the sentry exclusively controls the

@@ -135,6 +135,12 @@ func Collect(sysRoot string, devices []Device) (*Snapshot, error) {
 			return nil, err
 		}
 	}
+	// Built-in drivers can omit the module attributes.
+	for _, name := range []string{"initstate", "version"} {
+		if err := s.readFile(sysRoot, "module/amdgpu/"+name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
 	err := filepath.WalkDir(filepath.Join(sysRoot, topology), func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
