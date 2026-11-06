@@ -89,7 +89,6 @@ func (fd *deviceFD) kfdIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) err
 	switch cmd {
 	case amdgpu.AMDKFD_IOC_GET_VERSION,
 		amdgpu.AMDKFD_IOC_DESTROY_QUEUE,
-		amdgpu.AMDKFD_IOC_GET_CLOCK_COUNTERS,
 		amdgpu.AMDKFD_IOC_DESTROY_EVENT,
 		amdgpu.AMDKFD_IOC_SET_EVENT,
 		amdgpu.AMDKFD_IOC_RUNTIME_ENABLE:
@@ -97,6 +96,16 @@ func (fd *deviceFD) kfdIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) err
 		// r_debug is a cookie kept for debuggers; the driver never
 		// dereferences it.
 		return fd.passthrough(t, cmd, addr)
+	case amdgpu.AMDKFD_IOC_GET_CLOCK_COUNTERS:
+		var v amdgpu.KFDClockCounters
+		if _, err := v.CopyIn(t, addr); err != nil {
+			return err
+		}
+		// GPU ID zero requests only the CPU and system counters.
+		if v.GPUID != 0 && !fd.dev.proxy.gpus[v.GPUID] {
+			return linuxerr.EINVAL
+		}
+		return copyOut(t, cmd, addr, &v, fd.call(t, cmd, &v))
 	case amdgpu.AMDKFD_IOC_SET_MEMORY_POLICY:
 		var v amdgpu.KFDSetMemoryPolicy
 		return fd.gpuIoctl(t, cmd, addr, &v, &v.GPUID)
@@ -147,12 +156,33 @@ func (fd *deviceFD) createQueue(t *kernel.Task, addr hostarch.Addr) error {
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
-	// SDMA queues require preparation of their CPU read-pointer mappings.
-	if v.QueueType != amdgpu.KFD_IOC_QUEUE_TYPE_COMPUTE && v.QueueType != amdgpu.KFD_IOC_QUEUE_TYPE_COMPUTE_AQL {
+	switch v.QueueType {
+	case amdgpu.KFD_IOC_QUEUE_TYPE_COMPUTE,
+		amdgpu.KFD_IOC_QUEUE_TYPE_COMPUTE_AQL,
+		amdgpu.KFD_IOC_QUEUE_TYPE_SDMA,
+		amdgpu.KFD_IOC_QUEUE_TYPE_SDMA_XGMI,
+		amdgpu.KFD_IOC_QUEUE_TYPE_SDMA_BY_ENG_ID:
+	default:
 		return linuxerr.EINVAL
 	}
 	if !fd.dev.proxy.gpus[v.GPUID] {
 		return linuxerr.EINVAL
+	}
+	// Queue loading and SDMA accounting read these addresses with the CPU.
+	// Exclude platform-private memory and populate ordinary application pages
+	// without replacing device mappings that are already installed.
+	for _, ptr := range []uint64{v.ReadPointerAddress, v.WritePointerAddress} {
+		ar, ok := hostarch.Addr(ptr).ToRange(8)
+		if !ok {
+			return linuxerr.EFAULT
+		}
+		ar.Start = ar.Start.RoundDown()
+		if ar.End, ok = ar.End.RoundUp(); !ok {
+			return linuxerr.EFAULT
+		}
+		if err := t.MemoryManager().EnsureAddressSpaceMappingsForCPU(t, ar); err != nil {
+			return err
+		}
 	}
 	return copyOut(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, addr, &v, fd.call(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, &v))
 }
@@ -340,8 +370,9 @@ func (fd *deviceFD) mapMemory(t *kernel.Task, cmd uint32, addr hostarch.Addr) er
 	return copyOut(t, cmd, addr, &v, err)
 }
 
-// waitEvents polls between interruptible sleeps so a host wait does not
-// prevent application threads from making progress.
+// waitEvents polls between interruptible sleeps. The flat transport allows
+// application threads to run during waits; neither the event data nor the
+// returned status establishes ownership of a host resource.
 func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 	var v amdgpu.KFDWaitEvents
 	if _, err := v.CopyIn(t, addr); err != nil {
@@ -350,46 +381,71 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 	if v.NumEvents > amdgpu.KFD_SIGNAL_EVENT_LIMIT {
 		return linuxerr.EINVAL
 	}
-	// Each host wait re-arms its waiters, which consumes pending auto-reset
-	// signals, so waiting for all of several events cannot be split up.
+	// Polling consumes pending auto-reset signals, so waiting for all of
+	// several events cannot be split up.
 	if v.WaitForAll != 0 && v.NumEvents > 1 {
 		return linuxerr.EINVAL
 	}
-	var event amdgpu.KFDEventData
-	events := make([]byte, int(v.NumEvents)*event.SizeBytes())
-	ptr, timeout := v.EventsPtr, v.Timeout
-	if _, err := t.CopyInBytes(hostarch.Addr(ptr), events); err != nil {
-		return err
+	as, ok := t.MemoryManager().AddressSpace().(platform.HostMMIO)
+	if !ok {
+		return linuxerr.EOPNOTSUPP
 	}
-	v.EventsPtr = hostBufferPointer(events)
+	if v.NumEvents != 0 {
+		var event amdgpu.KFDEventData
+		ar, ok := hostarch.Addr(v.EventsPtr).ToRange(uint64(v.NumEvents) * uint64(event.SizeBytes()))
+		if !ok {
+			return linuxerr.EFAULT
+		}
+		ar.Start = ar.Start.RoundDown()
+		if ar.End, ok = ar.End.RoundUp(); !ok {
+			return linuxerr.EFAULT
+		}
+		if err := t.MemoryManager().EnsureAddressSpaceMappingsForCPU(t, ar); err != nil {
+			return err
+		}
+	}
+	ptr, timeout := v.EventsPtr, v.Timeout
 	var deadline time.Time
 	if timeout != amdgpu.KFD_EVENT_TIMEOUT_INFINITE {
 		deadline = time.Now().Add(time.Duration(min(timeout, 0x7fffffff)) * time.Millisecond)
 	}
+	buf := make([]byte, v.SizeBytes())
+	wait := 100 * time.Microsecond
 	var err error
 	for {
-		wait := 50 * time.Millisecond
-		if !deadline.IsZero() {
-			wait = max(min(wait, time.Until(deadline)), 0)
+		v.EventsPtr, v.Timeout = ptr, 0
+		v.MarshalBytes(buf)
+		// No translated descriptors or Sentry addresses enter writable
+		// scratch. Event buffers are ordinary application memory, and all
+		// returned values affect only this application's wait result.
+		result, transportErr := as.IoctlFlat(fd.hostFD, amdgpu.AMDKFD_IOC_WAIT_EVENTS, buf)
+		if transportErr != nil {
+			err = transportErr
+			break
 		}
-		v.Timeout = 0
-		err = fd.call(t, amdgpu.AMDKFD_IOC_WAIT_EVENTS, &v, platform.HostIoctlBuffer{PointerOffset: 0, Data: events})
+		var output amdgpu.KFDWaitEvents
+		output.UnmarshalBytes(buf)
+		v.WaitResult = output.WaitResult
+		if result.Errno != 0 {
+			err = result.Errno
+		}
 		if err != nil || v.WaitResult != amdgpu.KFD_IOC_WAIT_RESULT_TIMEOUT || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			break
 		}
-		if _, err := t.BlockWithTimeout(nil, true, wait); err != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, err) {
+		pause := wait
+		if !deadline.IsZero() {
+			pause = max(min(pause, time.Until(deadline)), 0)
+		}
+		if _, err := t.BlockWithTimeout(nil, true, pause); err != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, err) {
 			err = linuxerr.ERESTARTSYS
 			break
 		}
+		wait = min(wait*2, 10*time.Millisecond)
 	}
 	v.EventsPtr, v.Timeout = ptr, timeout
-	if err == nil && v.WaitResult == amdgpu.KFD_IOC_WAIT_RESULT_COMPLETE {
-		_, err = t.CopyOutBytes(hostarch.Addr(ptr), events)
-	}
 	if err != nil {
 		v.WaitResult = amdgpu.KFD_IOC_WAIT_RESULT_FAIL
-		// As the driver does when interrupted by a signal: the restarted
-		// call gets the remaining timeout.
+		// A restarted finite wait gets its remaining timeout.
 		if linuxerr.Equals(linuxerr.ERESTARTSYS, err) && !deadline.IsZero() {
 			v.Timeout = uint32(max(time.Until(deadline), 0) / time.Millisecond)
 		}

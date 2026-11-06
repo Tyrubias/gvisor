@@ -609,7 +609,7 @@ func (mm *MemoryManager) handleASIOFault(ctx context.Context, addr hostarch.Addr
 	mm.activeMu.DowngradeLock()
 	defer mm.activeMu.RUnlock()
 
-	err = mm.mapASLocked(ctx, pseg, ar, memmap.PlatformEffectDefault, false /* singleMap */)
+	err = mm.mapASLocked(ctx, pseg, ar, memmap.PlatformEffectDefault)
 	return translateIOError(ctx, err)
 }
 

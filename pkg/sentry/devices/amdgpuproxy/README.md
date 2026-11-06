@@ -25,6 +25,12 @@ and relocated into that scratch. Translated host descriptors and returned
 resource identifiers cannot be changed by application threads during the
 operation. Host addresses of Sentry buffers are never passed to the driver.
 
+KFD event waits use `platform.HostMMIO` with application memory and untrusted
+results. They do not translate embedded descriptors or create resources. The
+proxy consumes only the wait status, and serializes these calls with protected
+operations. Nonblocking polls with interruptible sleeps let other application
+threads and address-space operations progress.
+
 An address space with device context is destroyed when its application exits;
 it is not returned to the systrap pool. KFD's MMU release notifier tears down
 its queues. The proxy then releases its references to registered application
@@ -40,6 +46,10 @@ preserves the parent's registered pages across fork.
 Device mappings are installed in the application's host mm. The host driver
 sets their CPU memory attributes. KFD doorbell and MMIO mappings are excluded
 from fork. Mapping population must not replace driver-owned VMAs.
+
+SDMA queues and virtual memory allocations are supported, including sharing
+virtual allocations through PRIME descriptors. Queue creation prepares the CPU
+read-pointer and write-pointer mappings without replacing device VMAs.
 
 XNACK retry faults are disabled before a KFD descriptor is exposed to an
 application. Retry faults must not resolve against systrap's private VMAs.
@@ -70,13 +80,8 @@ reference is available in the receiving process without a duplicate.
 
 ## Current limitations
 
-The compute path requires these ROCm settings:
-
-```
-HSA_ENABLE_SDMA=0 HSA_USE_SVM=0 HSA_XNACK=0
-HIP_MEM_POOL_USE_VM=0 DEBUG_HIP_MEM_POOL_VMHEAP=0 HIP_VMEM_MANAGE_SUPPORT=0
-```
-
-SDMA, SVM, and checkpoint/restore are not yet supported. Event waits remain
-interruptible; wait-for-all on multiple events is rejected. The application must have a writable temporary directory for
-ROCm code loading.
+SVM, XNACK retry faults, and checkpoint/restore are not supported. Workloads
+that request SVM must use its fallback, for example with `HSA_USE_SVM=0` and
+`HSA_XNACK=0`. Event waits remain interruptible; wait-for-all on multiple KFD
+events is rejected. The application must have a writable temporary directory
+for ROCm code loading.

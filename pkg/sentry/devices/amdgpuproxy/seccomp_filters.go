@@ -15,7 +15,6 @@
 package amdgpuproxy
 
 import (
-	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/amdgpu"
 	"gvisor.dev/gvisor/pkg/seccomp"
 )
@@ -31,9 +30,13 @@ func HostMMIOIoctlRules() seccomp.SyscallRule {
 		amdgpu.DRM_IOCTL_PRIME_FD_TO_HANDLE,
 		amdgpu.DRM_IOCTL_SYNCOBJ_CREATE,
 		amdgpu.DRM_IOCTL_SYNCOBJ_DESTROY,
+		amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT,
+		amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT_V1,
 		amdgpu.DRM_IOCTL_AMDGPU_GEM_MMAP,
 		amdgpu.DRM_IOCTL_AMDGPU_GEM_METADATA,
 		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT_RW,
 		amdgpu.DRM_IOCTL_AMDGPU_GEM_OP,
 		amdgpu.AMDKFD_IOC_EXPORT_DMABUF,
 		amdgpu.AMDKFD_IOC_IMPORT_DMABUF,
@@ -64,11 +67,4 @@ func HostMMIOIoctlRules() seccomp.SyscallRule {
 		ioctls = append(ioctls, seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(uintptr(cmd))})
 	}
 	return ioctls
-}
-
-// Filters returns the host syscalls required by the proxy.
-func Filters() seccomp.SyscallRules {
-	return seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
-		unix.SYS_IOCTL: HostMMIOIoctlRules(),
-	})
 }

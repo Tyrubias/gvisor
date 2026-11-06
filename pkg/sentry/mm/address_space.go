@@ -83,6 +83,22 @@ const asyncLoadMapUnit = 32 << 20
 // +checklocksexclude:mm.mappingMu
 // +checklocksexclude:mm.activeMu
 func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar hostarch.AddrRange) error {
+	return mm.ensureAddressSpaceMappings(ctx, ar, false /* allowDeviceMappings */)
+}
+
+// EnsureAddressSpaceMappingsForCPU prepares application mappings for host
+// driver CPU accesses. Existing device mappings remain in place. Like
+// EnsureAddressSpaceMappings, this resolves copy-on-write but does not pin.
+//
+// +checklocksexclude:mm.mappingMu
+// +checklocksexclude:mm.activeMu
+func (mm *MemoryManager) EnsureAddressSpaceMappingsForCPU(ctx context.Context, ar hostarch.AddrRange) error {
+	return mm.ensureAddressSpaceMappings(ctx, ar, true /* allowDeviceMappings */)
+}
+
+// +checklocksexclude:mm.mappingMu
+// +checklocksexclude:mm.activeMu
+func (mm *MemoryManager) ensureAddressSpaceMappings(ctx context.Context, ar hostarch.AddrRange, allowDeviceMappings bool) error {
 	if !ar.WellFormed() || ar.Length() == 0 || !ar.IsPageAligned() || !mm.applicationAddrRange().IsSupersetOf(ar) {
 		return linuxerr.EFAULT
 	}
@@ -98,13 +114,16 @@ func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar host
 		if !vma.realPerms.Read && !vma.realPerms.Write {
 			return linuxerr.EACCES
 		}
-		if vma.requirePlatformEffect {
+		if vma.requirePlatformEffect && !allowDeviceMappings {
 			return linuxerr.EFAULT
 		}
 	}
 
 	mm.activeMu.Lock()
 	for vseg := vfirst; vseg.Ok() && vseg.Start() < ar.End; vseg = vseg.NextSegment() {
+		if vseg.ValuePtr().requirePlatformEffect {
+			continue
+		}
 		at := hostarch.Read
 		if vseg.ValuePtr().effectivePerms.Write {
 			at = hostarch.Write
@@ -120,12 +139,22 @@ func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar host
 	// Limit mapping to ar: remapping an adjacent device VMA can destroy state
 	// maintained by its driver. Mapping whole PMAs, rather than faulting one
 	// page at a time, also avoids per-page host mmap calls for resident memory.
-	return mm.mapASLocked(ctx, mm.pmas.LowerBoundSegment(ar.Start), ar, memmap.PlatformEffectPopulate, false /* singleMap */)
+	if !allowDeviceMappings {
+		return mm.mapASLocked(ctx, mm.pmas.LowerBoundSegment(ar.Start), ar, memmap.PlatformEffectPopulate)
+	}
+	for vseg := vfirst; vseg.Ok() && vseg.Start() < ar.End; vseg = vseg.NextSegment() {
+		if vseg.ValuePtr().requirePlatformEffect {
+			continue
+		}
+		vr := vseg.Range().Intersect(ar)
+		if err := mm.mapASLocked(ctx, mm.pmas.LowerBoundSegment(vr.Start), vr, memmap.PlatformEffectPopulate); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// mapASLocked maps addresses in ar into mm.as. If singleMap is true, each
-// PMA is mapped with one platform call, even when it exceeds the normal chunk
-// size. Some host devices require a complete buffer mapping.
+// mapASLocked maps addresses in ar into mm.as.
 //
 // Preconditions:
 //   - ar.Length() != 0.
@@ -133,7 +162,7 @@ func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar host
 //   - pseg == mm.pmas.LowerBoundSegment(ar.Start).
 //
 // +checklocksread:mm.activeMu
-func (mm *MemoryManager) mapASLocked(ctx context.Context, pseg pmaIterator, ar hostarch.AddrRange, platformEffect memmap.MMapPlatformEffect, singleMap bool) error {
+func (mm *MemoryManager) mapASLocked(ctx context.Context, pseg pmaIterator, ar hostarch.AddrRange, platformEffect memmap.MMapPlatformEffect) error {
 	if platformEffect == memmap.PlatformEffectCommit && ar.Length() > (1<<30) {
 		// FIXME(b/445932215, b/445939339): Don't precommit very large ranges
 		// via platform.AddressSpace.MapFile() for now, since holding locks
@@ -184,7 +213,7 @@ func (mm *MemoryManager) mapASLocked(ctx context.Context, pseg pmaIterator, ar h
 			// AddressSpace.MapFile() on singleMapThreshold-aligned chunks so
 			// we can check ctx.Killed() reasonably frequently.
 			const singleMapThreshold = 1 << 30
-			if singleMap || pmaMapAR.Length() <= singleMapThreshold {
+			if pmaMapAR.Length() <= singleMapThreshold {
 				if err := mm.as.MapFile(pmaMapAR.Start, pma.file, pseg.fileRangeOf(pmaMapAR), perms, platformEffect == memmap.PlatformEffectCommit); err != nil {
 					return err
 				}
@@ -202,6 +231,34 @@ func (mm *MemoryManager) mapASLocked(ctx context.Context, pseg pmaIterator, ar h
 						return linuxerr.EINTR
 					}
 				}
+			}
+		}
+		pseg = pseg.NextSegment()
+	}
+	return nil
+}
+
+// mapDeviceASLocked populates device mappings without splitting backing
+// ranges. Host devices may require a complete buffer in a single mmap.
+//
+// Preconditions are as for mapASLocked.
+//
+// +checklocksread:mm.activeMu
+func (mm *MemoryManager) mapDeviceASLocked(ctx context.Context, pseg pmaIterator, ar hostarch.AddrRange, platformEffect memmap.MMapPlatformEffect) error {
+	precommit := platformEffect == memmap.PlatformEffectCommit && ar.Length() <= 1<<30
+	for pseg.Ok() && pseg.Start() < ar.End {
+		pma := pseg.ValuePtr()
+		mr := pseg.Range().Intersect(ar)
+		perms := pma.effectivePerms
+		if pma.needCOW {
+			perms.Write = false
+		}
+		if perms.Any() {
+			if err := mm.as.MapFile(mr.Start, pma.file, pseg.fileRangeOf(mr), perms, precommit); err != nil {
+				return err
+			}
+			if ctx.Killed() {
+				return linuxerr.EINTR
 			}
 		}
 		pseg = pseg.NextSegment()

@@ -15,6 +15,8 @@
 package amdgpuproxy
 
 import (
+	"time"
+
 	"gvisor.dev/gvisor/pkg/abi/amdgpu"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
@@ -25,6 +27,9 @@ import (
 
 // maxDRMBuffer bounds the nested buffers of DRM queries.
 const maxDRMBuffer = 4096
+
+// maxDRMHandles bounds arrays of per-file DRM handles and timeline points.
+const maxDRMHandles = 4096
 
 func (fd *deviceFD) drmIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) error {
 	switch cmd {
@@ -38,6 +43,10 @@ func (fd *deviceFD) drmIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) err
 		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA:
 		// These argument versions contain per-file handles and scalars.
 		return fd.passthrough(t, cmd, addr)
+	case amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT_V1:
+		return fd.timelineWait(t, cmd, addr)
+	case amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT, amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT_RW:
+		return fd.gemVA(t, cmd, addr)
 	case amdgpu.DRM_IOCTL_PRIME_HANDLE_TO_FD:
 		return fd.primeHandleToFD(t, addr)
 	case amdgpu.DRM_IOCTL_PRIME_FD_TO_HANDLE:
@@ -110,21 +119,13 @@ func (fd *deviceFD) primeHandleToFD(t *kernel.Task, addr hostarch.Addr) error {
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
-	if v.Flags & ^uint32(3) != 0 {
+	if v.Flags & ^uint32(linux.O_CLOEXEC|linux.O_RDWR) != 0 {
 		return linuxerr.EINVAL
 	}
 	if err := fd.call(t, cmd, &v); err != nil {
 		return err
 	}
-	// DRM_CLOEXEC and DRM_RDWR are 1 and 2, respectively.
-	flags := uint32(linux.O_RDONLY)
-	if v.Flags&1 != 0 {
-		flags |= linux.O_CLOEXEC
-	}
-	if v.Flags&2 != 0 {
-		flags |= linux.O_RDWR
-	}
-	guestFD, err := fd.dev.proxy.newDMABufFD(t, v.FD, flags)
+	guestFD, err := fd.dev.proxy.newDMABufFD(t, v.FD, v.Flags)
 	if err != nil {
 		return err
 	}
@@ -156,7 +157,7 @@ func (fd *deviceFD) primeFDToHandle(t *kernel.Task, addr hostarch.Addr) error {
 
 func (fd *deviceFD) gemOp(t *kernel.Task, addr hostarch.Addr) error {
 	const cmd = amdgpu.DRM_IOCTL_AMDGPU_GEM_OP
-	var v amdgpu.DRMAMDGPUOp
+	var v amdgpu.DRMGEMOp
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
@@ -179,4 +180,70 @@ func (fd *deviceFD) gemOp(t *kernel.Task, addr hostarch.Addr) error {
 	default:
 		return linuxerr.EINVAL
 	}
+}
+
+func (fd *deviceFD) gemVA(t *kernel.Task, cmd uint32, addr hostarch.Addr) error {
+	var v amdgpu.DRMGEMVAExt
+	if _, err := v.CopyIn(t, addr); err != nil {
+		return err
+	}
+	if v.NumSyncobjHandles > maxDRMHandles {
+		return linuxerr.EINVAL
+	}
+	handles := make([]byte, int(v.NumSyncobjHandles)*4)
+	ptr := v.InputFenceSyncobjHandles
+	if _, err := t.CopyInBytes(hostarch.Addr(ptr), handles); err != nil {
+		return err
+	}
+	v.InputFenceSyncobjHandles = hostBufferPointer(handles)
+	err := fd.call(t, cmd, &v, platform.HostIoctlBuffer{PointerOffset: 56, Data: handles})
+	v.InputFenceSyncobjHandles = ptr
+	return copyOut(t, cmd, addr, &v, err)
+}
+
+func (fd *deviceFD) timelineWait(t *kernel.Task, cmd uint32, addr hostarch.Addr) error {
+	var v amdgpu.DRMSyncobjTimelineWait
+	buf := make([]byte, v.SizeBytes())
+	size := linux.IOC_SIZE(cmd)
+	if _, err := t.CopyInBytes(addr, buf[:size]); err != nil {
+		return err
+	}
+	v.UnmarshalBytes(buf)
+	if v.CountHandles > maxDRMHandles {
+		return linuxerr.EINVAL
+	}
+	handles, points := make([]byte, int(v.CountHandles)*4), make([]byte, int(v.CountHandles)*8)
+	hptr, pptr, timeout := v.Handles, v.Points, v.TimeoutNsec
+	if _, err := t.CopyInBytes(hostarch.Addr(hptr), handles); err != nil {
+		return err
+	}
+	if _, err := t.CopyInBytes(hostarch.Addr(pptr), points); err != nil {
+		return err
+	}
+	v.Handles, v.Points, v.TimeoutNsec = hostBufferPointer(handles), hostBufferPointer(points), 0
+	var err error
+	for {
+		err = fd.call(t, cmd, &v, platform.HostIoctlBuffer{PointerOffset: 0, Data: handles}, platform.HostIoctlBuffer{PointerOffset: 8, Data: points})
+		if !linuxerr.Equals(linuxerr.ETIME, err) {
+			break
+		}
+		pause := 100 * time.Microsecond
+		if timeout >= 0 {
+			remaining := time.Duration(timeout - t.Kernel().MonotonicClock().Now().Nanoseconds())
+			if remaining <= 0 {
+				break
+			}
+			pause = min(pause, remaining)
+		}
+		if _, blocked := t.BlockWithTimeout(nil, true, pause); blocked != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, blocked) {
+			err = linuxerr.ERESTARTSYS
+			break
+		}
+	}
+	v.Handles, v.Points, v.TimeoutNsec = hptr, pptr, timeout
+	v.MarshalBytes(buf)
+	if _, outErr := t.CopyOutBytes(addr, buf[:size]); outErr != nil {
+		return outErr
+	}
+	return err
 }

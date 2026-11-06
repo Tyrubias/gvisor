@@ -46,8 +46,11 @@ const (
 
 // Queue types.
 const (
-	KFD_IOC_QUEUE_TYPE_COMPUTE     = 0x0
-	KFD_IOC_QUEUE_TYPE_COMPUTE_AQL = 0x2
+	KFD_IOC_QUEUE_TYPE_COMPUTE        = 0x0
+	KFD_IOC_QUEUE_TYPE_COMPUTE_AQL    = 0x2
+	KFD_IOC_QUEUE_TYPE_SDMA           = 0x1
+	KFD_IOC_QUEUE_TYPE_SDMA_XGMI      = 0x3
+	KFD_IOC_QUEUE_TYPE_SDMA_BY_ENG_ID = 0x4
 )
 
 // Allocation flags.
@@ -328,4 +331,17 @@ type KFDIPCImportHandle struct {
 	ShareHandle KFDIPCShareHandle
 	GPUID       uint32
 	Flags       uint32
+}
+
+// KFDClockCounters is struct kfd_ioctl_get_clock_counters_args.
+//
+// +marshal
+type KFDClockCounters struct {
+	_                  structs.HostLayout
+	GPUClockCounter    uint64
+	CPUClockCounter    uint64
+	SystemClockCounter uint64
+	SystemClockFreq    uint64
+	GPUID              uint32
+	Pad                uint32
 }

@@ -17,7 +17,6 @@ package systrap
 import (
 	"fmt"
 	"strings"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/hostarch"
@@ -155,7 +154,7 @@ func (s *subprocess) executeHostDeviceRequest(r *hostDeviceRequest) hostDeviceRe
 	if err := s.initHostDeviceScratch(); err != nil {
 		return hostDeviceReply{err: err}
 	}
-	scratch := unsafe.Slice((*byte)(unsafe.Pointer(s.hostDeviceScratchAddr)), hostDeviceScratchSize)
+	scratch := s.hostDeviceScratch
 	used := len(r.path) + 1
 	if r.path == "" {
 		used = (len(r.buf) + 7) &^ 7
@@ -206,18 +205,17 @@ func (s *subprocess) executeHostDeviceRequest(r *hostDeviceRequest) hostDeviceRe
 
 // +checklocks:s.syscallThreadMu
 func (s *subprocess) initHostDeviceScratch() error {
-	if s.hostDeviceScratchAddr != 0 {
+	if len(s.hostDeviceScratch) != 0 {
 		return nil
 	}
 	fr, err := s.memoryFile.Allocate(hostDeviceScratchSize, pgalloc.AllocOpts{Kind: usage.System, Dir: pgalloc.TopDown})
 	if err != nil {
 		return err
 	}
-	addr, errno := hostsyscall.RawSyscall6(unix.SYS_MMAP, 0, hostDeviceScratchSize,
-		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED, uintptr(s.memoryFile.FD()), uintptr(fr.Start))
-	if errno != 0 {
+	scratch, err := unix.Mmap(s.memoryFile.FD(), int64(fr.Start), hostDeviceScratchSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
 		s.memoryFile.DecRef(fr)
-		return errno
+		return err
 	}
 	t := s.syscallThread.thread
 	if _, err := t.syscallIgnoreInterrupt(&t.initRegs, unix.SYS_MMAP,
@@ -227,11 +225,11 @@ func (s *subprocess) initHostDeviceScratch() error {
 		arch.SyscallArgument{Value: unix.MAP_SHARED | unix.MAP_FIXED},
 		arch.SyscallArgument{Value: uintptr(s.memoryFile.FD())},
 		arch.SyscallArgument{Value: uintptr(fr.Start)}); err != nil {
-		_ = hostsyscall.RawSyscallErrno(unix.SYS_MUNMAP, addr, hostDeviceScratchSize, 0)
+		_ = unix.Munmap(scratch)
 		s.memoryFile.DecRef(fr)
 		return err
 	}
-	s.hostDeviceScratchAddr = addr
+	s.hostDeviceScratch = scratch
 	s.hostDeviceScratchRange = fr
 	return nil
 }
@@ -243,13 +241,13 @@ func (s *subprocess) releaseHostDeviceScratch() {
 		cleanup()
 	}
 	s.hostDeviceCleanups = nil
-	if s.hostDeviceScratchAddr == 0 {
+	if len(s.hostDeviceScratch) == 0 {
 		return
 	}
-	if errno := hostsyscall.RawSyscallErrno(unix.SYS_MUNMAP, s.hostDeviceScratchAddr, hostDeviceScratchSize, 0); errno != 0 {
-		panic(fmt.Sprintf("cannot unmap host device scratch: %v", errno))
+	if err := unix.Munmap(s.hostDeviceScratch); err != nil {
+		panic(fmt.Sprintf("cannot unmap host device scratch: %v", err))
 	}
-	s.hostDeviceScratchAddr = 0
+	s.hostDeviceScratch = nil
 	s.memoryFile.DecRef(s.hostDeviceScratchRange)
 	s.hostDeviceScratchRange = memmap.FileRange{}
 }

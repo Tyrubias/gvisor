@@ -179,7 +179,7 @@ type subprocess struct {
 	syscallThread   *syscallThread
 
 	// +checklocks:syscallThreadMu
-	hostDeviceScratchAddr uintptr
+	hostDeviceScratch []byte
 	// +checklocks:syscallThreadMu
 	hostDeviceScratchRange memmap.FileRange
 	// +checklocks:syscallThreadMu
@@ -1191,7 +1191,7 @@ func (s *subprocess) createSysmsgThread() error {
 	return s.withAliveRLock(func() error {
 		s.hostDeviceMu.RLock()
 		defer s.hostDeviceMu.RUnlock()
-		return s.createSysmsgThreadLocked()
+		return s.createSysmsgThreadLocked() // +checklocksforce: withAliveRLock holds aliveMu.
 	})
 }
 

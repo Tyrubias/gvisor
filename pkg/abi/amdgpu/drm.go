@@ -77,12 +77,58 @@ type DRMPrimeHandle struct {
 	FD     int32
 }
 
-// DRMAMDGPUOp is the original struct drm_amdgpu_gem_op.
+// DRMGEMOp is the original struct drm_amdgpu_gem_op.
 //
 // +marshal
-type DRMAMDGPUOp struct {
+type DRMGEMOp struct {
 	_      structs.HostLayout
 	Handle uint32
 	Op     uint32
 	Value  uint64
+}
+
+// Extended GEM_VA requests include VM timeline synchronization. Both direction
+// encodings are used by AMD driver and userspace releases.
+const (
+	DRM_IOCTL_AMDGPU_GEM_VA_EXT    = 0x40406448
+	DRM_IOCTL_AMDGPU_GEM_VA_EXT_RW = 0xc0406448
+)
+
+// DRMGEMVAExt is the extended struct drm_amdgpu_gem_va.
+//
+// +marshal
+type DRMGEMVAExt struct {
+	_                        structs.HostLayout
+	Handle                   uint32
+	Pad                      uint32
+	Operation                uint32
+	Flags                    uint32
+	VAAddress                uint64
+	OffsetInBO               uint64
+	MapSize                  uint64
+	VMTimelinePoint          uint64
+	VMTimelineSyncobjOut     uint32
+	NumSyncobjHandles        uint32
+	InputFenceSyncobjHandles uint64
+}
+
+// Timeline wait request versions, with and without the deadline hint.
+const (
+	DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT    = 0xc03064ca
+	DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT_V1 = 0xc02864ca
+)
+
+// DRMSyncobjTimelineWait is struct drm_syncobj_timeline_wait.
+//
+// +marshal
+type DRMSyncobjTimelineWait struct {
+	_             structs.HostLayout
+	Handles       uint64
+	Points        uint64
+	TimeoutNsec   int64
+	CountHandles  uint32
+	Flags         uint32
+	FirstSignaled uint32
+	Pad           uint32
+	DeadlineNsec  uint64
 }

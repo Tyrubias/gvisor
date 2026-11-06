@@ -26,17 +26,12 @@ nodes (`/dev/dri/card*`) are never exposed.
 
 ROCm has no equivalent of the NVIDIA container toolkit's library injection, so
 the container image must contain the ROCm userspace, or bind-mount the host's
-installation. Sandboxed applications must also run with the following
-environment, which disables the ROCm features that `amdgpuproxy` does not
-forward (see [Limitations](#limitations)):
+installation. Workloads that request shared virtual memory must select ROCm's
+non-SVM fallback (see [Limitations](#limitations)):
 
 ```
-HSA_ENABLE_SDMA=0
 HSA_USE_SVM=0
 HSA_XNACK=0
-HIP_MEM_POOL_USE_VM=0
-DEBUG_HIP_MEM_POOL_VMHEAP=0
-HIP_VMEM_MANAGE_SUPPORT=0
 ```
 
 With Docker, register a runtime whose `runsc` is invoked with
@@ -45,9 +40,7 @@ With Docker, register a runtime whose `runsc` is invoked with
 ```
 $ docker run --runtime=runsc --rm \
     --device=/dev/kfd --device=/dev/dri/renderD128 \
-    -e HSA_ENABLE_SDMA=0 -e HSA_USE_SVM=0 -e HSA_XNACK=0 \
-    -e HIP_MEM_POOL_USE_VM=0 -e DEBUG_HIP_MEM_POOL_VMHEAP=0 \
-    -e HIP_VMEM_MANAGE_SUPPORT=0 \
+    -e HSA_USE_SVM=0 -e HSA_XNACK=0 \
     rocm/pytorch python3 -c 'import torch; print(torch.cuda.get_device_name())'
 AMD Instinct MI300X
 ```
@@ -72,7 +65,7 @@ a writable temporary directory and shared memory, and run:
 ```
 python3 -m sglang.launch_server \
     --model-path /models/Qwen2.5-7B-Instruct \
-    --attention-backend triton --disable-cuda-graph \
+    --attention-backend triton \
     --mem-fraction-static 0.2 --context-length 4096 --max-running-requests 4
 ```
 
@@ -85,8 +78,7 @@ has been checked with concurrent requests to `/v1/chat/completions`.
     in the application's host address space. Multiple processes can use the
     GPU concurrently. Forked children must open their own KFD descriptor.
 *   **Unsupported ROCm features.** Shared virtual memory (SVM) and XNACK retry
-    faults, SDMA engines, the runtime debugger, and checkpoint/restore are not
-    supported. `hipMallocManaged()`
+    faults, the runtime debugger, and checkpoint/restore are not supported. `hipMallocManaged()`
     works through ROCm's non-SVM path, that is without GPU page migration.
 *   **Supported GPUs.** Only gfx942 (MI300) and gfx950 (MI355) GPUs are
     admitted, on the AMDGPU/KFD driver versions they were validated with. Other
