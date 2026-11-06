@@ -183,6 +183,8 @@ type subprocess struct {
 	// +checklocks:syscallThreadMu
 	hostDeviceScratchRange memmap.FileRange
 	// +checklocks:syscallThreadMu
+	hostDeviceQuiesce []func()
+	// +checklocks:syscallThreadMu
 	hostDeviceCleanups []func()
 
 	// sysmsgThreadsMu protects sysmsgThreads
@@ -558,6 +560,9 @@ func (s *subprocess) unmap() {
 // an unexpected death.
 func (s *subprocess) Release() {
 	if s.alive() {
+		if s.hostMMBound.Load() {
+			s.quiesceHostDevices()
+		}
 		s.unmap()
 	} else if s.hostMMBound.Load() {
 		panic("cannot release an unexpectedly dead device-bound address space")

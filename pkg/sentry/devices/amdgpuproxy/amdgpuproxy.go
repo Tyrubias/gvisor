@@ -83,6 +83,12 @@ type deviceContext struct {
 	group *kernel.ThreadGroup
 	// +checklocks:mu
 	allocations map[uint64]*allocation
+	// kfd retains a descriptor for queue teardown, even if the application
+	// closes all its KFD descriptors before exit.
+	// +checklocks:mu
+	kfd *deviceFD
+	// +checklocks:mu
+	queues map[uint32]struct{}
 }
 
 func (p *proxy) context(t *kernel.Task) (*deviceContext, error) {
@@ -96,12 +102,30 @@ func (p *proxy) context(t *kernel.Task) (*deviceContext, error) {
 	if c := p.contexts[as]; c != nil {
 		return c, nil
 	}
-	c := &deviceContext{proxy: p, owner: t.MemoryManager(), as: as, allocations: make(map[uint64]*allocation)}
-	if err := io.OnHostDeviceRelease(c.release); err != nil {
+	c := &deviceContext{proxy: p, owner: t.MemoryManager(), as: as, allocations: make(map[uint64]*allocation), queues: make(map[uint32]struct{})}
+	if err := io.OnHostDeviceRelease(c.quiesce, c.release); err != nil {
 		return nil, err
 	}
 	p.contexts[as] = c
 	return c, nil
+}
+
+func (c *deviceContext) quiesce() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	io := c.as.(platform.HostDeviceIO)
+	for id := range c.queues {
+		v := amdgpu.KFDDestroyQueue{QueueID: id}
+		var buf [8]byte
+		v.MarshalBytes(buf[:])
+		_, err := io.IoctlHostDevice(c.kfd.hostFD, amdgpu.AMDKFD_IOC_DESTROY_QUEUE, buf[:])
+		// A failed application destroy can still remove the queue. EINVAL
+		// means that this trusted queue ID is no longer present.
+		if err != nil && err != unix.EINVAL {
+			panic(fmt.Sprintf("cannot stop KFD queue %d before unmapping its address space: %v", id, err))
+		}
+		delete(c.queues, id)
+	}
 }
 
 func (c *deviceContext) release() {
@@ -116,6 +140,10 @@ func (c *deviceContext) release() {
 		}
 	}
 	c.allocations = nil
+	if c.kfd != nil {
+		c.kfd.vfsfd.DecRef(context.Background())
+		c.kfd = nil
+	}
 }
 
 func (p *proxy) beforeSave() {
@@ -195,6 +223,14 @@ func (d *device) Open(ctx context.Context, mnt *vfs.Mount, dent *vfs.Dentry, opt
 	}
 	fd.memmapFile.SetFD(hostFD)
 	fd.memmapFile.SetMemType(hostarch.MemoryTypeUncached)
+	if d.kfd {
+		c.mu.Lock()
+		if c.kfd == nil {
+			fd.vfsfd.IncRef()
+			c.kfd = fd
+		}
+		c.mu.Unlock()
+	}
 	return &fd.vfsfd, nil
 }
 

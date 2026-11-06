@@ -88,7 +88,6 @@ func (fd *deviceFD) passthrough(t *kernel.Task, cmd uint32, addr hostarch.Addr) 
 func (fd *deviceFD) kfdIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) error {
 	switch cmd {
 	case amdgpu.AMDKFD_IOC_GET_VERSION,
-		amdgpu.AMDKFD_IOC_DESTROY_QUEUE,
 		amdgpu.AMDKFD_IOC_DESTROY_EVENT,
 		amdgpu.AMDKFD_IOC_SET_EVENT,
 		amdgpu.AMDKFD_IOC_RUNTIME_ENABLE:
@@ -120,6 +119,8 @@ func (fd *deviceFD) kfdIoctl(t *kernel.Task, cmd uint32, addr hostarch.Addr) err
 		return fd.gpuIoctl(t, cmd, addr, &v, &v.GPUID)
 	case amdgpu.AMDKFD_IOC_CREATE_QUEUE:
 		return fd.createQueue(t, addr)
+	case amdgpu.AMDKFD_IOC_DESTROY_QUEUE:
+		return fd.destroyQueue(t, addr)
 	case amdgpu.AMDKFD_IOC_CREATE_EVENT:
 		return fd.createEvent(t, addr)
 	case amdgpu.AMDKFD_IOC_SET_XNACK_MODE:
@@ -184,7 +185,29 @@ func (fd *deviceFD) createQueue(t *kernel.Task, addr hostarch.Addr) error {
 			return err
 		}
 	}
-	return copyOut(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, addr, &v, fd.call(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, &v))
+	c := fd.context
+	c.mu.Lock()
+	err := fd.call(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, &v)
+	if err == nil {
+		c.queues[v.QueueID] = struct{}{}
+	}
+	c.mu.Unlock()
+	return copyOut(t, amdgpu.AMDKFD_IOC_CREATE_QUEUE, addr, &v, err)
+}
+
+func (fd *deviceFD) destroyQueue(t *kernel.Task, addr hostarch.Addr) error {
+	var v amdgpu.KFDDestroyQueue
+	if _, err := v.CopyIn(t, addr); err != nil {
+		return err
+	}
+	c := fd.context
+	c.mu.Lock()
+	err := fd.call(t, amdgpu.AMDKFD_IOC_DESTROY_QUEUE, &v)
+	if err == nil {
+		delete(c.queues, v.QueueID)
+	}
+	c.mu.Unlock()
+	return copyOut(t, amdgpu.AMDKFD_IOC_DESTROY_QUEUE, addr, &v, err)
 }
 
 // createEvent checks that an application-supplied signal page holds the

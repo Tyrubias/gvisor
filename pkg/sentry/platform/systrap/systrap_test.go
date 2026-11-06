@@ -293,11 +293,27 @@ func TestHostDeviceIO(t *testing.T) {
 	if err := unix.Close(int(fd)); err != nil {
 		t.Fatal(err)
 	}
-	released := false
-	if err := s.OnHostDeviceRelease(func() { released = true }); err != nil {
+	quiesced, released := false, false
+	if err := s.OnHostDeviceRelease(func() {
+		var params [4]byte
+		if _, err := s.IoctlHostDevice(int32(r.Fd()), unix.TIOCINQ, params[:]); err != nil || hostarch.ByteOrder.Uint32(params[:]) != 3 {
+			t.Fatalf("TIOCINQ during quiesce: got %v, %v; want 3 bytes", err, params)
+		}
+		quiesced = true
+	}, func() {
+		if !quiesced || !s.dead.Load() {
+			t.Error("cleanup ran before device context destruction")
+		}
+		released = true
+	}); err != nil {
 		t.Fatal(err)
 	}
+	s.IncRef()
 	s.Release()
+	if !quiesced || released || s.dead.Load() {
+		t.Fatal("devices must quiesce before the last platform reference is released")
+	}
+	s.DecRef(s.release)
 	if !released || !s.dead.Load() {
 		t.Fatal("device context was not destroyed")
 	}

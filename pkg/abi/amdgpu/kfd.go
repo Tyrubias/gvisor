@@ -101,6 +101,15 @@ type KFDCreateQueue struct {
 	MetadataRingSize      uint32
 }
 
+// KFDDestroyQueue is struct kfd_ioctl_destroy_queue_args.
+//
+// +marshal
+type KFDDestroyQueue struct {
+	_       structs.HostLayout
+	QueueID uint32
+	Pad     uint32
+}
+
 // KFDSetMemoryPolicy is struct kfd_ioctl_set_memory_policy_args.
 // AlternateApertureBase is a GPU address.
 //

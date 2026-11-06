@@ -33,10 +33,13 @@ type HostDeviceIO interface {
 	// resumes, so they may establish ownership of returned host descriptors.
 	IoctlHostDevice(hostFD int32, request uint32, buf []byte, nested ...HostIoctlBuffer) (uintptr, error)
 
-	// OnHostDeviceRelease registers cleanup after the host device context has
-	// been destroyed, before the platform releases its backing memory. Cleanup
-	// must not access the AddressSpace or its MemoryManager's mappings.
-	OnHostDeviceRelease(cleanup func()) error
+	// OnHostDeviceRelease registers two phases of address-space cleanup.
+	// Quiesce runs before application mappings are removed and must stop device
+	// access to them. It may call IoctlHostDevice, but must not access the
+	// MemoryManager's mappings. Cleanup runs after the host device context has
+	// been destroyed, before the platform releases its backing memory. It must
+	// not access the AddressSpace or its MemoryManager's mappings.
+	OnHostDeviceRelease(quiesce, cleanup func()) error
 }
 
 // HostIoctlBuffer describes an ioctl's nested buffer. PointerOffset locates
