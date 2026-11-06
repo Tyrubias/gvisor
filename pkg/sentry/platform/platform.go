@@ -644,6 +644,9 @@ type Options struct {
 	// with a global process pool may require the same rules for every New.
 	HostMMIOIoctlRules seccomp.SyscallRule
 
+	// HostDeviceIO permits protected device operations in application host processes.
+	HostDeviceIO bool
+
 	// DeviceFile is the device file to use (e.g. /dev/kvm for the KVM
 	// platform).
 	DeviceFile *fd.FD

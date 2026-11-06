@@ -41,7 +41,7 @@ const childEnv = "SYSTRAP_TEST_CHILD"
 
 func TestMain(m *testing.M) {
 	switch mode := os.Getenv(childEnv); mode {
-	case "", "hostmmio":
+	case "", "hostmmio", "hostdevice":
 		cpuid.Initialize()
 		os.Exit(m.Run())
 	case "stuck":
@@ -244,5 +244,61 @@ func TestHostMMIO(t *testing.T) {
 	var status unix.WaitStatus
 	if _, err := unix.Wait4(int(tid), &status, unix.WALL|unix.WNOHANG, nil); err != unix.ECHILD {
 		t.Errorf("syscall thread was not reaped: %v", err)
+	}
+}
+
+func TestHostDeviceIO(t *testing.T) {
+	if os.Getenv(childEnv) != "hostdevice" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHostDeviceIO$", "-test.v")
+		cmd.Env = append(os.Environ(), childEnv+"=hostdevice")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("HostDeviceIO child: %v\n%s", err, out)
+		}
+		return
+	}
+	p, err := New(platform.Options{
+		HostDeviceIO:       true,
+		HostMMIOIoctlRules: seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(unix.TIOCINQ)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	as, err := p.NewAddressSpace(platform.AddressSpaceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := as.(*subprocess)
+	if err := s.createSysmsgThread(); err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if _, err := w.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		var params [4]byte
+		if _, err := s.IoctlHostDevice(int32(r.Fd()), unix.TIOCINQ, params[:]); err != nil || hostarch.ByteOrder.Uint32(params[:]) != 3 {
+			t.Fatalf("TIOCINQ: got %v, %v; want 3 bytes", err, params)
+		}
+	}
+	fd, err := s.OpenHostDevice("/dev/null", unix.O_RDWR|unix.O_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Close(int(fd)); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	if err := s.OnHostDeviceRelease(func() { released = true }); err != nil {
+		t.Fatal(err)
+	}
+	s.Release()
+	if !released || !s.dead.Load() {
+		t.Fatal("device context was not destroyed")
 	}
 }

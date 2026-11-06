@@ -172,6 +172,16 @@ type subprocess struct {
 	// trampolines.
 	usertrap *usertrap.State
 
+	// hostDeviceMu excludes new sysmsg threads during protected device operations.
+	hostDeviceMu sync.RWMutex
+
+	// +checklocks:syscallThreadMu
+	hostDeviceScratchAddr uintptr
+	// +checklocks:syscallThreadMu
+	hostDeviceScratchRange memmap.FileRange
+	// +checklocks:syscallThreadMu
+	hostDeviceCleanups []func()
+
 	syscallThreadMu sync.Mutex
 	syscallThread   *syscallThread
 
@@ -254,6 +264,8 @@ func handlePtraceSyscallRequestError(req any, format string, values ...any) {
 	switch req := req.(type) {
 	case requestThread:
 		req.thread <- threadCreationResult{err: fmt.Errorf(format, values...)}
+	case *hostDeviceRequest:
+		req.done <- hostDeviceReply{err: fmt.Errorf(format, values...)}
 	case requestStub:
 		req.done <- nil
 	}
@@ -270,6 +282,8 @@ func (s *subprocess) handlePtraceSyscallRequest(req any) {
 		switch req := req.(type) {
 		case requestThread:
 			req.thread <- threadCreationResult{err: errDeadSubprocess}
+		case *hostDeviceRequest:
+			req.done <- hostDeviceReply{err: errDeadSubprocess}
 		case requestStub:
 			req.done <- nil
 		}
@@ -286,6 +300,8 @@ func (s *subprocess) handlePtraceSyscallRequest(req any) {
 	ptraceThread := s.syscallThread.thread
 
 	switch r := req.(type) {
+	case *hostDeviceRequest:
+		r.done <- s.executeHostDeviceRequest(r)
 	case requestThread:
 		t, err := ptraceThread.clone()
 		if err != nil {
@@ -1172,7 +1188,11 @@ func initSysmsgThreadPriority() {
 // createSysmsgThread creates a new sysmsg thread.
 // The thread starts processing any available context in the context queue.
 func (s *subprocess) createSysmsgThread() error {
-	return s.withAliveRLock(s.createSysmsgThreadLocked)
+	return s.withAliveRLock(func() error {
+		s.hostDeviceMu.RLock()
+		defer s.hostDeviceMu.RUnlock()
+		return s.createSysmsgThreadLocked()
+	})
 }
 
 // markSysmsgThreadCreationFailed must precede recycling any stack backing or

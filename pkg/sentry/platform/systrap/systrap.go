@@ -88,9 +88,10 @@ var (
 	stubInitProcess uintptr
 
 	// Memory region to store thread specific stacks.
-	stubSysmsgStack uintptr
-	stubSysmsgStart uintptr
-	stubSysmsgEnd   uintptr
+	stubSysmsgStack       uintptr
+	stubSysmsgStart       uintptr
+	stubSysmsgEnd         uintptr
+	stubHostDeviceScratch uintptr
 	// Memory region to store the contextQueue.
 	stubContextQueueRegion    uintptr
 	stubContextQueueRegionLen uintptr
@@ -303,6 +304,7 @@ func New(opts platform.Options) (*Systrap, error) {
 		opts.HostMMIOIoctlRules = opts.HostMMIOIoctlRules.Copy()
 		opts.HostMMIOIoctlRules.Repr(&ioctlKey)
 	}
+	fmt.Fprintf(&ioctlKey, ";devices=%t", opts.HostDeviceIO)
 	mbCh := hostmm.Probe(false)
 	if !disableSyscallPatching {
 		disableSyscallPatching = opts.DisableSyscallPatching
@@ -346,7 +348,7 @@ func New(opts platform.Options) (*Systrap, error) {
 		// done before initializing any other processes.
 		usesSeccompNotify := false
 		source, err := newSubprocess(func() (*thread, error) {
-			return createStubWithIoctls(opts.HostMMIOIoctlRules)
+			return createStubWithIoctls(opts.HostMMIOIoctlRules, opts.HostDeviceIO)
 		}, mf, usesSeccompNotify, disableSyscallPatching)
 		if err != nil {
 			stubErr = fmt.Errorf("initialize systrap: %w", err)

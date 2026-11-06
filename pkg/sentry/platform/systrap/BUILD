@@ -47,6 +47,7 @@ go_library(
         "filters.go",
         "filters_amd64.go",
         "filters_arm64.go",
+        "host_device_unsafe.go",
         "lib_amd64.s",
         "lib_arm64.s",
         "metrics.go",

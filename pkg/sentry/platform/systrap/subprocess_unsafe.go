@@ -144,6 +144,7 @@ func (s *subprocess) destroyHostMM() {
 			}
 		}
 	}
+	s.releaseHostDeviceScratch()
 	// A traced sysmsg process can first report its exit to us as tracer, then
 	// become our waitable child when its original parent (the syscall thread)
 	// exits. Reap that second notification when running as the PID-namespace init.

@@ -53,6 +53,8 @@ func (systrapSeccomp) ConfigKey() string {
 func (systrapSeccomp) SyscallFilters(vars precompiledseccomp.Values) seccomp.SyscallRules {
 	return seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 		unix.SYS_PTRACE: seccomp.Or{
+			seccomp.PerArg{seccomp.EqualTo(unix.PTRACE_SEIZE), seccomp.AnyValue{}, seccomp.EqualTo(0), seccomp.EqualTo(unix.PTRACE_O_EXITKILL)},
+			seccomp.PerArg{seccomp.EqualTo(unix.PTRACE_INTERRUPT), seccomp.AnyValue{}, seccomp.EqualTo(0), seccomp.EqualTo(0)},
 			seccomp.PerArg{
 				seccomp.EqualTo(unix.PTRACE_ATTACH),
 			},

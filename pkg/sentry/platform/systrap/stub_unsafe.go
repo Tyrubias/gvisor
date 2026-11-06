@@ -247,6 +247,9 @@ func stubInit() {
 	stubContextRegionLen = sysmsg.AllocatedSizeofThreadContextStruct * (maxGuestContexts + 1)
 	mapLen, _ = hostarch.PageRoundUp(mapLen + stubContextRegionLen)
 
+	stubHostDeviceScratch = mapLen
+	mapLen += hostDeviceScratchSize
+
 	// Try a few times to avoid cases when new mappings are created.
 	for i := 0; i < 32; i++ {
 		if i == 0 { // fast path
@@ -291,6 +294,7 @@ func stubInit() {
 	stubContextQueueRegion += uintptr(gap)
 	stubSpinningThreadQueueAddr += uintptr(gap)
 	stubContextRegion += uintptr(gap)
+	stubHostDeviceScratch += uintptr(gap)
 
 	// Copy the stub to the address.
 	targetSlice := unsafe.Slice((*byte)(unsafe.Pointer(stubStart)), procStubLen)
@@ -304,6 +308,7 @@ func stubInit() {
 	stubContextQueueRegion += stubStart
 	stubSpinningThreadQueueAddr += stubStart
 	stubContextRegion += stubStart
+	stubHostDeviceScratch += stubStart
 
 	// Align stubSysmsgStack to the per-thread stack size.
 	// Look at sysmsg/sighandler.c:sysmsg_addr() for more details.
