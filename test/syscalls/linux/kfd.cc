@@ -21,6 +21,7 @@
 #include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -184,6 +185,28 @@ TEST(KFDTest, ProcessOwnership) {
                 IsPosixErrorOkAndHolds(0));
   }
   EXPECT_THAT(ioctl(fd.get(), kGetVersion, &version), SyscallSucceeds());
+}
+
+TEST(KFDTest, CloseNotification) {
+  FileDescriptor fd(open("/dev/kfd", O_RDWR | O_CLOEXEC));
+  SKIP_IF(fd.get() < 0 && (errno == ENOENT || errno == ENODEV));
+  ASSERT_THAT(fd.get(), SyscallSucceeds());
+  FileDescriptor duplicate(dup(fd.get()));
+  ASSERT_THAT(duplicate.get(), SyscallSucceeds());
+  const FileDescriptor notify(inotify_init1(IN_NONBLOCK | IN_CLOEXEC));
+  ASSERT_THAT(notify.get(), SyscallSucceeds());
+  const int watch = inotify_add_watch(notify.get(), "/dev/kfd", IN_CLOSE_WRITE);
+  ASSERT_THAT(watch, SyscallSucceeds());
+
+  fd.reset();
+  inotify_event event = {};
+  EXPECT_THAT(read(notify.get(), &event, sizeof(event)),
+              SyscallFailsWithErrno(EAGAIN));
+  duplicate.reset();
+  ASSERT_THAT(read(notify.get(), &event, sizeof(event)),
+              SyscallSucceedsWithValue(sizeof(event)));
+  EXPECT_EQ(event.wd, watch);
+  EXPECT_EQ(event.mask, IN_CLOSE_WRITE);
 }
 
 PosixErrorOr<FileDescriptor> AcquireKFDVM(int fd, uint32_t* gpu_id) {

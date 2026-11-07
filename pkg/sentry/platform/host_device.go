@@ -39,6 +39,10 @@ type HostDeviceIO interface {
 	// MemoryManager's mappings. Cleanup runs after the host device context has
 	// been destroyed, before the platform releases its backing memory. It must
 	// not access the AddressSpace or its MemoryManager's mappings.
+	//
+	// Both callbacks may run with MemoryManager and platform locks held. They
+	// must not acquire filesystem locks, including by releasing VFS file
+	// descriptions.
 	OnHostDeviceRelease(quiesce, cleanup func()) error
 }
 

@@ -36,8 +36,11 @@ threads and address-space operations progress.
 
 An address space with a device context is destroyed when its last application
 user exits or replaces it with exec; it is not returned to the systrap pool.
-The proxy retains a KFD descriptor and destroys tracked queues before removing
-application mappings, even if the application has closed all KFD descriptors.
+The proxy retains a host KFD descriptor and destroys tracked queues before
+removing application mappings, even if the application has closed all KFD
+descriptors.
+This reference is independent of guest file descriptions, so address-space
+cleanup does not enter VFS while memory-management locks are held.
 After the host address space exits, the proxy releases its references to
 registered application memory, including allocations that the application did
 not explicitly free.

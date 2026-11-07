@@ -85,10 +85,10 @@ type deviceContext struct {
 	kfdInitialized bool
 	// +checklocks:mu
 	allocations map[uint64]*allocation
-	// kfd retains a descriptor for queue teardown, even if the application
-	// closes all its KFD descriptors before exit.
+	// kfd is a host descriptor for queue teardown, or -1. It is independent
+	// of guest file descriptions, which can acquire filesystem locks on release.
 	// +checklocks:mu
-	kfd *deviceFD
+	kfd int32
 	// +checklocks:mu
 	queues map[uint32]struct{}
 }
@@ -104,7 +104,7 @@ func (p *proxy) context(t *kernel.Task) (*deviceContext, error) {
 	if c := p.contexts[as]; c != nil {
 		return c, nil
 	}
-	c := &deviceContext{proxy: p, owner: t.MemoryManager(), as: as, allocations: make(map[uint64]*allocation), queues: make(map[uint32]struct{})}
+	c := &deviceContext{proxy: p, owner: t.MemoryManager(), as: as, allocations: make(map[uint64]*allocation), kfd: -1, queues: make(map[uint32]struct{})}
 	if err := io.OnHostDeviceRelease(c.quiesce, c.release); err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (c *deviceContext) quiesce() {
 		v := amdgpu.KFDDestroyQueue{QueueID: id}
 		var buf [8]byte
 		v.MarshalBytes(buf[:])
-		_, err := io.IoctlHostDevice(c.kfd.hostFD, amdgpu.AMDKFD_IOC_DESTROY_QUEUE, buf[:])
+		_, err := io.IoctlHostDevice(c.kfd, amdgpu.AMDKFD_IOC_DESTROY_QUEUE, buf[:])
 		// A failed application destroy can still remove the queue. EINVAL
 		// means that this trusted queue ID is no longer present.
 		if err != nil && err != unix.EINVAL {
@@ -169,9 +169,9 @@ func (c *deviceContext) release() {
 		}
 	}
 	c.allocations = nil
-	if c.kfd != nil {
-		c.kfd.vfsfd.DecRef(context.Background())
-		c.kfd = nil
+	if c.kfd >= 0 {
+		unix.Close(int(c.kfd))
+		c.kfd = -1
 	}
 }
 
@@ -227,7 +227,15 @@ func (d *device) Open(ctx context.Context, mnt *vfs.Mount, dent *vfs.Dentry, opt
 			if c.group == nil {
 				c.group = t.ThreadGroup()
 			}
-			if err = c.initKFD(opened); err != nil {
+			err = c.initKFD(opened)
+			if err == nil && c.kfd < 0 {
+				var retained int
+				retained, err = unix.Dup(int(opened))
+				if err == nil {
+					c.kfd = int32(retained)
+				}
+			}
+			if err != nil {
 				_ = unix.Close(int(opened))
 			}
 		}
@@ -250,14 +258,6 @@ func (d *device) Open(ctx context.Context, mnt *vfs.Mount, dent *vfs.Dentry, opt
 	}
 	fd.memmapFile.SetFD(hostFD)
 	fd.memmapFile.SetMemType(hostarch.MemoryTypeUncached)
-	if d.kfd {
-		c.mu.Lock()
-		if c.kfd == nil {
-			fd.vfsfd.IncRef()
-			c.kfd = fd
-		}
-		c.mu.Unlock()
-	}
 	return &fd.vfsfd, nil
 }
 
