@@ -248,18 +248,23 @@ func (s *subprocess) initHostDeviceScratch() error {
 
 func (s *subprocess) releaseHostDeviceScratch() {
 	s.syscallThreadMu.Lock()
-	defer s.syscallThreadMu.Unlock()
-	for _, cleanup := range s.hostDeviceCleanups {
+	cleanups := s.hostDeviceCleanups
+	scratch := s.hostDeviceScratch
+	fr := s.hostDeviceScratchRange
+	s.hostDeviceCleanups = nil
+	s.hostDeviceScratch = nil
+	s.hostDeviceScratchRange = memmap.FileRange{}
+	s.syscallThreadMu.Unlock()
+
+	// Callbacks acquire device-proxy locks, which precede platform locks.
+	for _, cleanup := range cleanups {
 		cleanup()
 	}
-	s.hostDeviceCleanups = nil
-	if len(s.hostDeviceScratch) == 0 {
+	if len(scratch) == 0 {
 		return
 	}
-	if err := unix.Munmap(s.hostDeviceScratch); err != nil {
+	if err := unix.Munmap(scratch); err != nil {
 		panic(fmt.Sprintf("cannot unmap host device scratch: %v", err))
 	}
-	s.hostDeviceScratch = nil
-	s.memoryFile.DecRef(s.hostDeviceScratchRange)
-	s.hostDeviceScratchRange = memmap.FileRange{}
+	s.memoryFile.DecRef(fr)
 }

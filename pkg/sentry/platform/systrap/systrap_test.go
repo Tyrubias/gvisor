@@ -304,6 +304,11 @@ func TestHostDeviceIO(t *testing.T) {
 		if !quiesced || !s.dead.Load() {
 			t.Error("cleanup ran before device context destruction")
 		}
+		if !s.syscallThreadMu.TryLock() {
+			t.Error("cleanup ran with syscallThreadMu held")
+		} else {
+			s.syscallThreadMu.Unlock()
+		}
 		released = true
 	}); err != nil {
 		t.Fatal(err)

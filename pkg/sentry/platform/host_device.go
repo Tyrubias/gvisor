@@ -40,9 +40,9 @@ type HostDeviceIO interface {
 	// been destroyed, before the platform releases its backing memory. It must
 	// not access the AddressSpace or its MemoryManager's mappings.
 	//
-	// Both callbacks may run with MemoryManager and platform locks held. They
-	// must not acquire filesystem locks, including by releasing VFS file
-	// descriptions.
+	// The platform invokes both callbacks without holding its locks. Callbacks
+	// may run with MemoryManager locks held and must not acquire filesystem
+	// locks, including by releasing VFS file descriptions.
 	OnHostDeviceRelease(quiesce, cleanup func()) error
 }
 
