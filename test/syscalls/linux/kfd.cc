@@ -84,6 +84,7 @@ constexpr unsigned long kDestroyEvent = _IOW('K', 9, KFDEvent);
 constexpr unsigned long kWaitEvents = _IOWR('K', 12, KFDWaitEvents);
 constexpr uint32_t kEventMemory = 8;
 constexpr uint32_t kTimeoutInfinite = UINT32_MAX;
+constexpr uint32_t kWaitResultComplete = 0;
 constexpr uint32_t kWaitResultTimeout = 1;
 constexpr uint32_t kWaitResultFail = 2;
 
@@ -219,6 +220,73 @@ TEST(KFDTest, RenderTimelineWaitExpired) {
   SKIP_IF(!tested);
 }
 
+TEST(KFDTest, WaitEventsBounds) {
+  const FileDescriptor fd(open("/dev/kfd", O_RDWR | O_CLOEXEC));
+  SKIP_IF(fd.get() < 0 && (errno == ENOENT || errno == ENODEV));
+  ASSERT_THAT(fd.get(), SyscallSucceeds());
+
+  for (uint32_t count : {0u, 4097u, UINT32_MAX}) {
+    for (uint32_t timeout :
+         {0u, 1u, uint32_t{INT32_MAX}, UINT32_MAX - 1, kTimeoutInfinite}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "count=" << count << " timeout=" << timeout);
+      KFDWaitEvents wait = {};
+      // These counts do not require access to the event array.
+      wait.events_ptr = UINT64_MAX;
+      wait.num_events = count;
+      wait.timeout = timeout;
+      wait.wait_result = 77;
+      if (count == 0) {
+        EXPECT_THAT(ioctl(fd.get(), kWaitEvents, &wait), SyscallSucceeds());
+        EXPECT_EQ(wait.wait_result, kWaitResultComplete);
+      } else {
+        EXPECT_THAT(ioctl(fd.get(), kWaitEvents, &wait),
+                    SyscallFailsWithErrno(ENOMEM));
+        EXPECT_EQ(wait.wait_result, kWaitResultFail);
+      }
+      EXPECT_EQ(wait.timeout, timeout);
+      EXPECT_EQ(wait.events_ptr, UINT64_MAX);
+    }
+  }
+}
+
+TEST(KFDTest, WaitEventsBadMemory) {
+  const FileDescriptor fd(open("/dev/kfd", O_RDWR | O_CLOEXEC));
+  SKIP_IF(fd.get() < 0 && (errno == ENOENT || errno == ENODEV));
+  ASSERT_THAT(fd.get(), SyscallSucceeds());
+  const size_t size = getpagesize();
+  void* page =
+      mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(page, MAP_FAILED);
+  const auto unmap =
+      Cleanup([&] { EXPECT_THAT(munmap(page, size), SyscallSucceeds()); });
+  for (uint64_t ptr : {uint64_t{0}, uint64_t{1}, UINT64_MAX - 15,
+                       uint64_t{reinterpret_cast<uintptr_t>(page)}}) {
+    SCOPED_TRACE(ptr);
+    KFDWaitEvents wait = {};
+    wait.events_ptr = ptr;
+    wait.num_events = 1;
+    wait.timeout = kTimeoutInfinite;
+    wait.wait_result = 77;
+    EXPECT_THAT(ioctl(fd.get(), kWaitEvents, &wait),
+                SyscallFailsWithErrno(EFAULT));
+    EXPECT_EQ(wait.wait_result, kWaitResultFail);
+    EXPECT_EQ(wait.timeout, kTimeoutInfinite);
+    EXPECT_EQ(wait.events_ptr, ptr);
+  }
+  ASSERT_THAT(mprotect(page, size, PROT_READ | PROT_WRITE), SyscallSucceeds());
+  auto* wait = static_cast<KFDWaitEvents*>(page);
+  *wait = {};
+  wait->num_events = UINT32_MAX;
+  wait->timeout = kTimeoutInfinite;
+  wait->wait_result = 77;
+  ASSERT_THAT(mprotect(page, size, PROT_READ), SyscallSucceeds());
+  EXPECT_THAT(ioctl(fd.get(), kWaitEvents, wait),
+              SyscallFailsWithErrno(EFAULT));
+  EXPECT_EQ(wait->wait_result, 77);
+  EXPECT_EQ(wait->timeout, kTimeoutInfinite);
+}
+
 using KFDWaitEventsTest = ::testing::TestWithParam<std::tuple<uint32_t, bool>>;
 
 TEST_P(KFDWaitEventsTest, Interrupted) {
@@ -275,6 +343,7 @@ TEST_P(KFDWaitEventsTest, Interrupted) {
   } else {
     if (!restart) {
       EXPECT_GT(wait.timeout, 0);
+      EXPECT_LE(wait.timeout, uint32_t{INT32_MAX});
     }
     EXPECT_LT(wait.timeout, timeout);
   }
@@ -282,11 +351,14 @@ TEST_P(KFDWaitEventsTest, Interrupted) {
   signal.Join();
 }
 
-INSTANTIATE_TEST_SUITE_P(KFDTest, KFDWaitEventsTest,
-                         ::testing::Values(std::make_tuple(10000u, false),
-                                           std::make_tuple(kTimeoutInfinite,
-                                                           false),
-                                           std::make_tuple(1000u, true)));
+INSTANTIATE_TEST_SUITE_P(
+    KFDTest, KFDWaitEventsTest,
+    ::testing::Values(std::make_tuple(10000u, false),
+                      std::make_tuple(kTimeoutInfinite, false),
+                      std::make_tuple(1000u, true),
+                      std::make_tuple(uint32_t{INT32_MAX}, false),
+                      std::make_tuple(uint32_t{INT32_MAX} + 1, false),
+                      std::make_tuple(UINT32_MAX - 1, false)));
 
 }  // namespace
 }  // namespace testing

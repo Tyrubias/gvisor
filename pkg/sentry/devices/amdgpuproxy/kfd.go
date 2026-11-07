@@ -397,34 +397,40 @@ func (fd *deviceFD) mapMemory(t *kernel.Task, cmd uint32, addr hostarch.Addr) er
 // application threads to run during waits; neither the event data nor the
 // returned status establishes ownership of a host resource.
 func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
+	const cmd = amdgpu.AMDKFD_IOC_WAIT_EVENTS
 	var v amdgpu.KFDWaitEvents
 	if _, err := v.CopyIn(t, addr); err != nil {
 		return err
 	}
+	// KFD copies the failure result out for errors preparing the wait too.
+	v.WaitResult = amdgpu.KFD_IOC_WAIT_RESULT_FAIL
 	if v.NumEvents > amdgpu.KFD_SIGNAL_EVENT_LIMIT {
-		return linuxerr.EINVAL
+		return copyOut(t, cmd, addr, &v, linuxerr.ENOMEM)
 	}
 	// Polling consumes pending auto-reset signals, so waiting for all of
 	// several events cannot be split up.
 	if v.WaitForAll != 0 && v.NumEvents > 1 {
-		return linuxerr.EINVAL
+		return copyOut(t, cmd, addr, &v, linuxerr.EINVAL)
 	}
 	as, ok := t.MemoryManager().AddressSpace().(platform.HostMMIO)
 	if !ok {
-		return linuxerr.EOPNOTSUPP
+		return copyOut(t, cmd, addr, &v, linuxerr.EOPNOTSUPP)
 	}
 	if v.NumEvents != 0 {
 		var event amdgpu.KFDEventData
 		ar, ok := hostarch.Addr(v.EventsPtr).ToRange(uint64(v.NumEvents) * uint64(event.SizeBytes()))
 		if !ok {
-			return linuxerr.EFAULT
+			return copyOut(t, cmd, addr, &v, linuxerr.EFAULT)
 		}
 		ar.Start = ar.Start.RoundDown()
 		if ar.End, ok = ar.End.RoundUp(); !ok {
-			return linuxerr.EFAULT
+			return copyOut(t, cmd, addr, &v, linuxerr.EFAULT)
 		}
 		if err := t.MemoryManager().EnsureAddressSpaceMappingsForCPU(t, ar); err != nil {
-			return err
+			if linuxerr.Equals(linuxerr.EACCES, err) {
+				err = linuxerr.EFAULT
+			}
+			return copyOut(t, cmd, addr, &v, err)
 		}
 	}
 	ptr, timeout := v.EventsPtr, v.Timeout
@@ -441,7 +447,7 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 		// No translated descriptors or Sentry addresses enter writable
 		// scratch. Event buffers are ordinary application memory, and all
 		// returned values affect only this application's wait result.
-		result, transportErr := as.IoctlFlat(fd.hostFD, amdgpu.AMDKFD_IOC_WAIT_EVENTS, buf)
+		result, transportErr := as.IoctlFlat(fd.hostFD, cmd, buf)
 		if transportErr != nil {
 			err = transportErr
 			break
@@ -473,5 +479,5 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 			v.Timeout = uint32(max(time.Until(deadline), 0) / time.Millisecond)
 		}
 	}
-	return copyOut(t, amdgpu.AMDKFD_IOC_WAIT_EVENTS, addr, &v, err)
+	return copyOut(t, cmd, addr, &v, err)
 }
