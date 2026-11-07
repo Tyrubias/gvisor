@@ -459,7 +459,7 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 		if !deadline.IsZero() {
 			pause = max(min(pause, time.Until(deadline)), 0)
 		}
-		if _, err := t.BlockWithTimeout(nil, true, pause); err != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, err) {
+		if _, blocked := t.BlockWithTimeout(nil, true, pause); blocked != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, blocked) {
 			err = linuxerr.ERESTARTSYS
 			break
 		}
