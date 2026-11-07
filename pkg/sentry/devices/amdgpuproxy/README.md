@@ -51,9 +51,11 @@ SDMA queues and virtual memory allocations are supported, including sharing
 virtual allocations through PRIME descriptors. Queue creation prepares the CPU
 read-pointer and write-pointer mappings without replacing device VMAs.
 
-XNACK retry faults are disabled before a KFD descriptor is exposed to an
-application. Retry faults must not resolve against systrap's private VMAs.
-Requests to enable XNACK are rejected.
+The first KFD open queries XNACK and disables it if enabled. Later opens retain
+that state. Kernels built without SVM support reject the query with `EPERM`;
+they are accepted because their SVM fault resolution is unavailable. Retry
+faults must not resolve against systrap's private VMAs. Requests to enable
+XNACK are rejected.
 
 ## Admission and discovery
 

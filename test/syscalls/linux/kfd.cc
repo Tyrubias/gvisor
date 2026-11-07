@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <linux/kfd_ioctl.h>
 #include <signal.h>
 #include <stddef.h>
 #include <sys/ioctl.h>
@@ -24,6 +25,8 @@
 #include <atomic>
 #include <cstdint>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -48,6 +51,30 @@ struct KFDVersion {
 };
 
 constexpr unsigned long kGetVersion = _IOR('K', 1, KFDVersion);
+
+// KFDCreateQueue is the 96-byte queue creation ABI. Older system headers omit
+// the SDMA engine and metadata ring fields.
+struct KFDCreateQueue {
+  uint64_t ring_base_address;
+  uint64_t write_pointer_address;
+  uint64_t read_pointer_address;
+  uint64_t doorbell_offset;
+  uint32_t ring_size;
+  uint32_t gpu_id;
+  uint32_t queue_type;
+  uint32_t queue_percentage;
+  uint32_t queue_priority;
+  uint32_t queue_id;
+  uint64_t eop_buffer_address;
+  uint64_t eop_buffer_size;
+  uint64_t ctx_save_restore_address;
+  uint32_t ctx_save_restore_size;
+  uint32_t ctl_stack_size;
+  uint32_t sdma_engine_id;
+  uint32_t metadata_ring_size;
+};
+
+constexpr unsigned long kCreateQueue = _IOWR('K', 2, KFDCreateQueue);
 
 struct KFDCreateEvent {
   uint64_t event_page_offset;
@@ -145,6 +172,122 @@ TEST(KFDTest, ProcessOwnership) {
                 IsPosixErrorOkAndHolds(0));
   }
   EXPECT_THAT(ioctl(fd.get(), kGetVersion, &version), SyscallSucceeds());
+}
+
+TEST(KFDTest, ReopenWithQueue) {
+  const FileDescriptor fd(open("/dev/kfd", O_RDWR | O_CLOEXEC));
+  SKIP_IF(fd.get() < 0 && (errno == ENOENT || errno == ENODEV));
+  ASSERT_THAT(fd.get(), SyscallSucceeds());
+  kfd_ioctl_get_process_apertures_new_args apertures = {};
+  ASSERT_THAT(ioctl(fd.get(), AMDKFD_IOC_GET_PROCESS_APERTURES_NEW, &apertures),
+              SyscallSucceeds());
+  SKIP_IF(apertures.num_of_nodes == 0);
+  std::vector<kfd_process_device_apertures> devices(apertures.num_of_nodes);
+  apertures.kfd_process_device_apertures_ptr =
+      reinterpret_cast<uintptr_t>(devices.data());
+  ASSERT_THAT(ioctl(fd.get(), AMDKFD_IOC_GET_PROCESS_APERTURES_NEW, &apertures),
+              SyscallSucceeds());
+
+  glob_t nodes = {};
+  const int found = glob("/dev/dri/renderD*", 0, nullptr, &nodes);
+  const auto free_nodes = Cleanup([&] { globfree(&nodes); });
+  SKIP_IF(found == GLOB_NOMATCH);
+  ASSERT_EQ(found, 0);
+  FileDescriptor render;
+  kfd_ioctl_acquire_vm_args vm = {};
+  for (const auto& device : devices) {
+    for (size_t i = 0; i < nodes.gl_pathc; ++i) {
+      FileDescriptor candidate(open(nodes.gl_pathv[i], O_RDWR | O_CLOEXEC));
+      if (candidate.get() < 0 &&
+          (errno == EACCES || errno == ENODEV || errno == ENOENT)) {
+        continue;
+      }
+      ASSERT_THAT(candidate.get(), SyscallSucceeds());
+      vm.drm_fd = candidate.get();
+      vm.gpu_id = device.gpu_id;
+      const int ret = ioctl(fd.get(), AMDKFD_IOC_ACQUIRE_VM, &vm);
+      if (ret < 0 && errno == EINVAL) {
+        continue;
+      }
+      ASSERT_THAT(ret, SyscallSucceeds());
+      render = std::move(candidate);
+      break;
+    }
+    if (render.get() >= 0) {
+      break;
+    }
+  }
+  SKIP_IF(render.get() < 0);
+
+  const size_t size = getpagesize();
+  void* pages[3];
+  Cleanup unmap_cpu[3], free_memory[3], unmap_gpu[3];
+  for (int i = 0; i < 3; ++i) {
+    pages[i] =
+        mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ASSERT_NE(pages[i], MAP_FAILED);
+    unmap_cpu[i] = Cleanup(
+        [&, i] { EXPECT_THAT(munmap(pages[i], size), SyscallSucceeds()); });
+    kfd_ioctl_alloc_memory_of_gpu_args alloc = {};
+    alloc.va_addr = reinterpret_cast<uintptr_t>(pages[i]);
+    alloc.size = size;
+    alloc.gpu_id = vm.gpu_id;
+    alloc.flags =
+        KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+        KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED;
+    ASSERT_THAT(ioctl(fd.get(), AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &alloc),
+                SyscallSucceeds());
+    free_memory[i] = Cleanup([&, handle = alloc.handle] {
+      kfd_ioctl_free_memory_of_gpu_args args = {handle};
+      EXPECT_THAT(ioctl(fd.get(), AMDKFD_IOC_FREE_MEMORY_OF_GPU, &args),
+                  SyscallSucceeds());
+    });
+    ASSERT_EQ(mmap(pages[i], size, PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_FIXED, render.get(), alloc.mmap_offset),
+              pages[i]);
+    *static_cast<uint64_t*>(pages[i]) = 0;
+    kfd_ioctl_map_memory_to_gpu_args map = {};
+    map.handle = alloc.handle;
+    map.device_ids_array_ptr = reinterpret_cast<uintptr_t>(&vm.gpu_id);
+    map.n_devices = 1;
+    ASSERT_THAT(ioctl(fd.get(), AMDKFD_IOC_MAP_MEMORY_TO_GPU, &map),
+                SyscallSucceeds());
+    unmap_gpu[i] = Cleanup([&, handle = alloc.handle] {
+      kfd_ioctl_unmap_memory_from_gpu_args args = {};
+      args.handle = handle;
+      args.device_ids_array_ptr = reinterpret_cast<uintptr_t>(&vm.gpu_id);
+      args.n_devices = 1;
+      EXPECT_THAT(ioctl(fd.get(), AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU, &args),
+                  SyscallSucceeds());
+    });
+  }
+  // Keep an empty SDMA queue alive without submitting commands or mapping its
+  // doorbell. Destroy it before releasing the ring and pointer buffers.
+  KFDCreateQueue queue = {};
+  queue.ring_base_address = reinterpret_cast<uintptr_t>(pages[0]);
+  queue.write_pointer_address = reinterpret_cast<uintptr_t>(pages[1]);
+  queue.read_pointer_address = reinterpret_cast<uintptr_t>(pages[2]);
+  queue.ring_size = size;
+  queue.gpu_id = vm.gpu_id;
+  queue.queue_type = KFD_IOC_QUEUE_TYPE_SDMA;
+  queue.queue_percentage = 100;
+  ASSERT_THAT(ioctl(fd.get(), kCreateQueue, &queue), SyscallSucceeds());
+  const auto destroy = Cleanup([&] {
+    kfd_ioctl_destroy_queue_args args = {queue.queue_id, 0};
+    EXPECT_THAT(ioctl(fd.get(), AMDKFD_IOC_DESTROY_QUEUE, &args),
+                SyscallSucceeds());
+  });
+
+  const auto reopen = [&] {
+    const FileDescriptor other(open("/dev/kfd", O_RDWR | O_CLOEXEC));
+    ASSERT_THAT(other.get(), SyscallSucceeds());
+    KFDVersion version = {};
+    EXPECT_THAT(ioctl(other.get(), kGetVersion, &version), SyscallSucceeds());
+  };
+  reopen();
+  ScopedThread thread(reopen);
+  reopen();
+  thread.Join();
 }
 
 TEST(KFDTest, RenderTimelineWaitExpired) {

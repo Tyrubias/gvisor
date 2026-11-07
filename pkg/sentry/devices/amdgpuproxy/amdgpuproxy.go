@@ -82,6 +82,8 @@ type deviceContext struct {
 	// +checklocks:mu
 	group *kernel.ThreadGroup
 	// +checklocks:mu
+	kfdInitialized bool
+	// +checklocks:mu
 	allocations map[uint64]*allocation
 	// kfd retains a descriptor for queue teardown, even if the application
 	// closes all its KFD descriptors before exit.
@@ -126,6 +128,33 @@ func (c *deviceContext) quiesce() {
 		}
 		delete(c.queues, id)
 	}
+}
+
+// initKFD prevents GPU retry faults from populating platform-private VMAs.
+//
+// +checklocks:c.mu
+func (c *deviceContext) initKFD(hostFD int32) error {
+	if c.kfdInitialized {
+		return nil
+	}
+	io := c.as.(platform.HostDeviceIO)
+	var mode [4]byte
+	hostarch.ByteOrder.PutUint32(mode[:], ^uint32(0))
+	_, err := io.IoctlHostDevice(hostFD, amdgpu.AMDKFD_IOC_SET_XNACK_MODE, mode[:])
+	switch {
+	case err == unix.EPERM:
+		// KFD rejects the query when CONFIG_HSA_AMD_SVM is disabled.
+		// Those kernels cannot resolve GPU faults through SVM.
+	case err != nil:
+		return err
+	case hostarch.ByteOrder.Uint32(mode[:]) != 0:
+		clear(mode[:])
+		if _, err := io.IoctlHostDevice(hostFD, amdgpu.AMDKFD_IOC_SET_XNACK_MODE, mode[:]); err != nil {
+			return err
+		}
+	}
+	c.kfdInitialized = true
+	return nil
 }
 
 func (c *deviceContext) release() {
@@ -198,9 +227,7 @@ func (d *device) Open(ctx context.Context, mnt *vfs.Mount, dent *vfs.Dentry, opt
 		var opened int32
 		opened, err = io.OpenHostDevice("/dev/kfd", opts.Flags&(unix.O_ACCMODE|unix.O_NONBLOCK)|unix.O_CLOEXEC)
 		if err == nil {
-			// Retry faults must not resolve against platform-private VMAs.
-			var mode [4]byte
-			if _, err = io.IoctlHostDevice(opened, amdgpu.AMDKFD_IOC_SET_XNACK_MODE, mode[:]); err != nil {
+			if err = c.initKFD(opened); err != nil {
 				_ = unix.Close(int(opened))
 			}
 		}
