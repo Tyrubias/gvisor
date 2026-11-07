@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/seccomp/precompiledseccomp"
+	"gvisor.dev/gvisor/pkg/sentry/devices/amdgpuproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
 	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy"
@@ -182,6 +183,9 @@ func rules(opt Options, vars precompiledseccomp.Values) (seccomp.SyscallRules, s
 	}
 	if opt.HostFilesystem {
 		s.Merge(hostFilesystemFilters(vars))
+	}
+	if opt.AMDGPUProxy {
+		s.Merge(amdgpuproxy.Filters())
 	}
 	if opt.NVProxy {
 		s.Merge(nvproxy.Filters(opt.NVProxyCaps))

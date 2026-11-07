@@ -30,6 +30,11 @@ import (
 // maxGPUs bounds per-GPU arrays copied for an ioctl.
 const maxGPUs = 256
 
+// waitPollInterval bounds the sleep between nonblocking device waits. The
+// canonical syscall thread must remain available for other device operations
+// and address-space changes while an application waits.
+const waitPollInterval = 100 * time.Microsecond
+
 type ioctlArgs interface {
 	marshal.Marshallable
 	CopyIn(marshal.CopyContext, hostarch.Addr) (int, error)
@@ -41,6 +46,15 @@ func (fd *deviceFD) call(t *kernel.Task, cmd uint32, v marshal.Marshallable, nes
 	b := make([]byte, v.SizeBytes())
 	v.MarshalBytes(b)
 	err := fd.hostIoctl(t, cmd, b, nested...)
+	v.UnmarshalBytes(b)
+	return err
+}
+
+// callFlat is like call, but its arguments and results are untrusted.
+func (fd *deviceFD) callFlat(t *kernel.Task, cmd uint32, v marshal.Marshallable, nested ...platform.HostIoctlBuffer) error {
+	b := make([]byte, v.SizeBytes())
+	v.MarshalBytes(b)
+	err := fd.hostIoctlFlat(t, cmd, b, nested...)
 	v.UnmarshalBytes(b)
 	return err
 }
@@ -76,7 +90,12 @@ func (fd *deviceFD) passthrough(t *kernel.Task, cmd uint32, addr hostarch.Addr) 
 			return err
 		}
 	}
-	err := fd.hostIoctl(t, cmd, b)
+	var err error
+	if fd.dev.kfd {
+		err = fd.hostIoctlFlat(t, cmd, b)
+	} else {
+		err = fd.hostIoctl(t, cmd, b)
+	}
 	if cmd&(linux.IOC_READ<<linux.IOC_DIRSHIFT) != 0 {
 		if _, cerr := t.CopyOutBytes(addr, b); cerr != nil {
 			return cerr
@@ -254,7 +273,7 @@ func (fd *deviceFD) getProcessApertures(t *kernel.Task, addr hostarch.Addr) erro
 		return err
 	}
 	var all amdgpu.KFDGetProcessApertures
-	if err := fd.call(t, cmd, &all); err != nil {
+	if err := fd.callFlat(t, cmd, &all); err != nil {
 		return err
 	}
 	if all.NumOfNodes > maxGPUs {
@@ -265,7 +284,7 @@ func (fd *deviceFD) getProcessApertures(t *kernel.Task, addr hostarch.Addr) erro
 	buf := make([]byte, int(all.NumOfNodes)*size)
 	if len(buf) != 0 {
 		all.AperturesPtr = hostBufferPointer(buf)
-		if err := fd.call(t, cmd, &all, platform.HostIoctlBuffer{PointerOffset: 0, Data: buf}); err != nil {
+		if err := fd.callFlat(t, cmd, &all, platform.HostIoctlBuffer{PointerOffset: 0, Data: buf}); err != nil {
 			return err
 		}
 	}
@@ -439,7 +458,6 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 		deadline = time.Now().Add(time.Duration(min(timeout, 0x7fffffff)) * time.Millisecond)
 	}
 	buf := make([]byte, v.SizeBytes())
-	wait := 100 * time.Microsecond
 	var err error
 	for {
 		v.EventsPtr, v.Timeout = ptr, 0
@@ -461,7 +479,7 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 		if err != nil || v.WaitResult != amdgpu.KFD_IOC_WAIT_RESULT_TIMEOUT || (!deadline.IsZero() && !time.Now().Before(deadline)) {
 			break
 		}
-		pause := wait
+		pause := waitPollInterval
 		if !deadline.IsZero() {
 			pause = max(min(pause, time.Until(deadline)), 0)
 		}
@@ -469,7 +487,6 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 			err = linuxerr.ERESTARTSYS
 			break
 		}
-		wait = min(wait*2, 10*time.Millisecond)
 	}
 	v.EventsPtr, v.Timeout = ptr, timeout
 	if err != nil {

@@ -232,7 +232,7 @@ func (fd *deviceFD) timelineWait(t *kernel.Task, cmd uint32, addr hostarch.Addr)
 		if timeout <= now {
 			break
 		}
-		pause := min(100*time.Microsecond, time.Duration(timeout-now))
+		pause := min(waitPollInterval, time.Duration(timeout-now))
 		if _, blocked := t.BlockWithTimeout(nil, true, pause); blocked != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, blocked) {
 			err = linuxerr.ERESTARTSYS
 			break

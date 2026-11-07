@@ -257,8 +257,11 @@ func TestHostDeviceIO(t *testing.T) {
 		return
 	}
 	p, err := New(platform.Options{
-		HostDeviceIO:       true,
-		HostMMIOIoctlRules: seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(unix.TIOCINQ)},
+		HostDeviceIO: true,
+		HostMMIOIoctlRules: seccomp.Or{
+			seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(unix.TIOCINQ)},
+			seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(unix.SIOCGIFCONF)},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -270,6 +273,27 @@ func TestHostDeviceIO(t *testing.T) {
 	s := as.(*subprocess)
 	if err := s.createSysmsgThread(); err != nil {
 		t.Fatal(err)
+	}
+	sock, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(sock)
+	var ifconf [16]byte
+	interfaces := make([]byte, 512)
+	hostarch.ByteOrder.PutUint32(ifconf[:], uint32(len(interfaces)))
+	result, err := s.IoctlHostDeviceFlat(int32(sock), unix.SIOCGIFCONF, ifconf[:], platform.HostIoctlBuffer{PointerOffset: 8, Data: interfaces})
+	if err != nil || result.Errno != 0 {
+		t.Fatalf("SIOCGIFCONF: got %+v, %v", result, err)
+	}
+	if n := hostarch.ByteOrder.Uint32(ifconf[:]); n == 0 || n > uint32(len(interfaces)) || interfaces[0] == 0 {
+		t.Fatalf("SIOCGIFCONF: invalid interface list of %d bytes", n)
+	}
+	if ptr := hostarch.ByteOrder.Uint64(ifconf[8:]); ptr != 0 {
+		t.Fatalf("SIOCGIFCONF: pointer was not restored: %#x", ptr)
+	}
+	if _, err := s.IoctlHostDeviceFlat(int32(sock), unix.SIOCGIFCONF, ifconf[:], platform.HostIoctlBuffer{PointerOffset: 8, Data: make([]byte, 4096)}); err != unix.E2BIG {
+		t.Fatalf("oversized nested buffer: got %v, want E2BIG", err)
 	}
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -307,7 +331,7 @@ func TestHostDeviceIO(t *testing.T) {
 		if !s.syscallThreadMu.TryLock() {
 			t.Error("cleanup ran with syscallThreadMu held")
 		} else {
-			s.syscallThreadMu.Unlock()
+			s.syscallThreadMu.Unlock() // +checklocksforce: TryLock succeeded.
 		}
 		released = true
 	}); err != nil {
@@ -321,5 +345,63 @@ func TestHostDeviceIO(t *testing.T) {
 	s.DecRef(s.release)
 	if !released || !s.dead.Load() {
 		t.Fatal("device context was not destroyed")
+	}
+}
+
+// BenchmarkHostDeviceIO measures the transport cost with idle sysmsg threads.
+// Run without tests so the source stub has this benchmark's ioctl policy.
+func BenchmarkHostDeviceIO(b *testing.B) {
+	p, err := New(platform.Options{
+		HostDeviceIO:       true,
+		HostMMIOIoctlRules: seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(unix.TIOCINQ)},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	for _, threads := range []int{1, 2, 4, 8, 16} {
+		for _, protected := range []bool{false, true} {
+			b.Run(fmt.Sprintf("threads=%d/protected=%t", threads, protected), func(b *testing.B) {
+				if threads > maxSysmsgThreads {
+					b.Skipf("platform supports at most %d sysmsg threads", maxSysmsgThreads)
+				}
+				as, err := p.NewAddressSpace(platform.AddressSpaceOptions{})
+				if err != nil {
+					b.Fatal(err)
+				}
+				defer as.Release()
+				s := as.(*subprocess)
+				for i := len(s.sysmsgThreads); i < threads; i++ {
+					if err := s.createSysmsgThread(); err != nil {
+						b.Fatal(err)
+					}
+				}
+				var params [4]byte
+				ioctl := func() {
+					if protected {
+						if _, err := s.IoctlHostDevice(int32(r.Fd()), unix.TIOCINQ, params[:]); err != nil {
+							b.Fatal(err)
+						}
+					} else {
+						result, err := s.IoctlFlat(int32(r.Fd()), unix.TIOCINQ, params[:])
+						if err != nil || result.Errno != 0 {
+							b.Fatalf("TIOCINQ: %+v, %v", result, err)
+						}
+					}
+				}
+				ioctl()
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					ioctl()
+				}
+				b.StopTimer()
+			})
+		}
 	}
 }

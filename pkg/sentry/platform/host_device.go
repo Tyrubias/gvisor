@@ -33,6 +33,14 @@ type HostDeviceIO interface {
 	// resumes, so they may establish ownership of returned host descriptors.
 	IoctlHostDevice(hostFD int32, request uint32, buf []byte, nested ...HostIoctlBuffer) (uintptr, error)
 
+	// IoctlHostDeviceFlat is like HostMMIO.IoctlFlat, with support for nested
+	// buffers. The platform relocates their pointers into application-writable
+	// scratch. Arguments and results are untrusted and must not establish
+	// ownership of host resources. The ioctl must not consume translated host
+	// descriptors or create descriptors. E2BIG indicates that the combined
+	// arguments exceed the platform's scratch capacity.
+	IoctlHostDeviceFlat(hostFD int32, request uint32, buf []byte, nested ...HostIoctlBuffer) (HostIoctlResult, error)
+
 	// OnHostDeviceRelease registers two phases of address-space cleanup.
 	// Quiesce runs before application mappings are removed and must stop device
 	// access to them. It may call IoctlHostDevice, but must not access the

@@ -15,8 +15,11 @@
 package amdgpuproxy
 
 import (
+	"runtime"
 	"unsafe"
 
+	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/abi/amdgpu"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
@@ -32,12 +35,44 @@ func hostBufferPointer(b []byte) uint64 {
 }
 
 func (fd *deviceFD) hostIoctl(t *kernel.Task, cmd uint32, arg []byte, nested ...platform.HostIoctlBuffer) error {
+	// PRIME imports can check current->mm when opening a USERPTR GEM object.
+	// Keep descriptor transfer in the application mm. Other admitted DRM
+	// ioctls use per-file state and Sentry-owned argument buffers.
+	if !fd.dev.kfd && cmd != amdgpu.DRM_IOCTL_PRIME_FD_TO_HANDLE && cmd != amdgpu.DRM_IOCTL_PRIME_HANDLE_TO_FD {
+		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd.hostFD), uintptr(cmd), uintptr(unsafe.Pointer(unsafe.SliceData(arg))))
+		runtime.KeepAlive(nested)
+		if errno != 0 {
+			return errno
+		}
+		return nil
+	}
 	io, ok := t.MemoryManager().AddressSpace().(platform.HostDeviceIO)
 	if !ok {
 		return linuxerr.EOPNOTSUPP
 	}
 	_, err := io.IoctlHostDevice(fd.hostFD, cmd, arg, nested...)
 	return err
+}
+
+// hostIoctlFlat forwards arguments whose contents and result need not be
+// protected from application writes. It must not receive translated host FDs.
+func (fd *deviceFD) hostIoctlFlat(t *kernel.Task, cmd uint32, arg []byte, nested ...platform.HostIoctlBuffer) error {
+	io, ok := t.MemoryManager().AddressSpace().(platform.HostDeviceIO)
+	if !ok {
+		return linuxerr.EOPNOTSUPP
+	}
+	result, err := io.IoctlHostDeviceFlat(fd.hostFD, cmd, arg, nested...)
+	if err == unix.E2BIG {
+		// Large query arrays can exceed the flat transport's capacity.
+		return fd.hostIoctl(t, cmd, arg, nested...)
+	}
+	if err != nil {
+		return err
+	}
+	if result.Errno != 0 {
+		return result.Errno
+	}
+	return nil
 }
 
 type userMemory struct {

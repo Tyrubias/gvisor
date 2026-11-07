@@ -15,6 +15,7 @@
 package amdgpuproxy
 
 import (
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/amdgpu"
 	"gvisor.dev/gvisor/pkg/seccomp"
 )
@@ -23,21 +24,8 @@ import (
 func HostMMIOIoctlRules() seccomp.SyscallRule {
 	var ioctls seccomp.Or
 	for _, cmd := range []uint32{
-		amdgpu.DRM_IOCTL_VERSION,
-		amdgpu.DRM_IOCTL_AMDGPU_INFO,
-		amdgpu.DRM_IOCTL_GEM_CLOSE,
 		amdgpu.DRM_IOCTL_PRIME_HANDLE_TO_FD,
 		amdgpu.DRM_IOCTL_PRIME_FD_TO_HANDLE,
-		amdgpu.DRM_IOCTL_SYNCOBJ_CREATE,
-		amdgpu.DRM_IOCTL_SYNCOBJ_DESTROY,
-		amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT,
-		amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT_V1,
-		amdgpu.DRM_IOCTL_AMDGPU_GEM_MMAP,
-		amdgpu.DRM_IOCTL_AMDGPU_GEM_METADATA,
-		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA,
-		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT,
-		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT_RW,
-		amdgpu.DRM_IOCTL_AMDGPU_GEM_OP,
 		amdgpu.AMDKFD_IOC_EXPORT_DMABUF,
 		amdgpu.AMDKFD_IOC_IMPORT_DMABUF,
 		amdgpu.AMDKFD_IOC_GET_DMABUF_INFO,
@@ -67,4 +55,27 @@ func HostMMIOIoctlRules() seccomp.SyscallRule {
 		ioctls = append(ioctls, seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(uintptr(cmd))})
 	}
 	return ioctls
+}
+
+// Filters returns the DRM ioctl requests executed in the Sentry.
+func Filters() seccomp.SyscallRules {
+	var ioctls seccomp.Or
+	for _, cmd := range []uint32{
+		amdgpu.DRM_IOCTL_VERSION,
+		amdgpu.DRM_IOCTL_AMDGPU_INFO,
+		amdgpu.DRM_IOCTL_GEM_CLOSE,
+		amdgpu.DRM_IOCTL_SYNCOBJ_CREATE,
+		amdgpu.DRM_IOCTL_SYNCOBJ_DESTROY,
+		amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT,
+		amdgpu.DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT_V1,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_MMAP,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_METADATA,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_VA_EXT_RW,
+		amdgpu.DRM_IOCTL_AMDGPU_GEM_OP,
+	} {
+		ioctls = append(ioctls, seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(uintptr(cmd))})
+	}
+	return seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{unix.SYS_IOCTL: ioctls})
 }

@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/hostsyscall"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
@@ -28,12 +29,28 @@ import (
 
 // IoctlFlat implements platform.HostMMIO.
 func (s *subprocess) IoctlFlat(hostFD int32, request uint32, buf []byte) (platform.HostIoctlResult, error) {
+	return s.IoctlHostDeviceFlat(hostFD, request, buf)
+}
+
+// IoctlHostDeviceFlat implements platform.HostDeviceIO.
+func (s *subprocess) IoctlHostDeviceFlat(hostFD int32, request uint32, buf []byte, nested ...platform.HostIoctlBuffer) (platform.HostIoctlResult, error) {
 	if hostFD < 0 {
 		return platform.HostIoctlResult{}, unix.EBADF
 	}
 	if len(buf) > len(syscallStubMessage{}.ioctlParams) {
 		return platform.HostIoctlResult{}, unix.E2BIG
 	}
+	size := (len(buf) + 7) &^ 7
+	for _, b := range nested {
+		if b.PointerOffset < 0 || b.PointerOffset > len(buf)-8 {
+			return platform.HostIoctlResult{}, unix.EINVAL
+		}
+		if len(b.Data) > len(syscallStubMessage{}.ioctlParams)-size {
+			return platform.HostIoctlResult{}, unix.E2BIG
+		}
+		size += (len(b.Data) + 7) &^ 7
+	}
+	ptrs := make([]uint64, len(nested))
 	var result platform.HostIoctlResult
 	err := s.withAliveRLock(func() error {
 		s.syscallThreadMu.Lock()
@@ -47,8 +64,21 @@ func (s *subprocess) IoctlFlat(hostFD int32, request uint32, buf []byte) (platfo
 		s.hostMMBound.Store(true)
 
 		t := s.syscallThread
-		copy(t.stubMessage.ioctlParams[:], buf)
 		paramsAddr := t.stubAddr + syscallStubMessageOffset + unsafe.Offsetof(syscallStubMessage{}.ioctlParams)
+		offset := (len(buf) + 7) &^ 7
+		for i, b := range nested {
+			ptrs[i] = hostarch.ByteOrder.Uint64(buf[b.PointerOffset:])
+			var ptr uint64
+			if len(b.Data) != 0 {
+				ptr = uint64(paramsAddr) + uint64(offset)
+				copy(t.stubMessage.ioctlParams[offset:], b.Data)
+			}
+			// Relocate before publishing buf: its original pointer may name
+			// Sentry memory, which must not be exposed to the application.
+			hostarch.ByteOrder.PutUint64(buf[b.PointerOffset:], ptr)
+			offset += (len(b.Data) + 7) &^ 7
+		}
+		copy(t.stubMessage.ioctlParams[:], buf)
 		// CLONE_FILES shares hostFD with the stub. The syscall request page is
 		// read-only there, protecting the FD, command, and parameter address.
 		ret, err := t.syscall(unix.SYS_IOCTL,
@@ -56,6 +86,12 @@ func (s *subprocess) IoctlFlat(hostFD int32, request uint32, buf []byte) (platfo
 			arch.SyscallArgument{Value: uintptr(request)},
 			arch.SyscallArgument{Value: paramsAddr})
 		copy(buf, t.stubMessage.ioctlParams[:])
+		offset = (len(buf) + 7) &^ 7
+		for i, b := range nested {
+			hostarch.ByteOrder.PutUint64(buf[b.PointerOffset:], ptrs[i])
+			copy(b.Data, t.stubMessage.ioctlParams[offset:offset+len(b.Data)])
+			offset += (len(b.Data) + 7) &^ 7
+		}
 		// The scratch page and syscall return are guest-writable. Keep the
 		// untrusted errno separate from transport and lifecycle failures.
 		result.Return = ret
