@@ -227,14 +227,13 @@ func (fd *deviceFD) timelineWait(t *kernel.Task, cmd uint32, addr hostarch.Addr)
 		if !linuxerr.Equals(linuxerr.ETIME, err) {
 			break
 		}
-		pause := 100 * time.Microsecond
-		if timeout >= 0 {
-			remaining := time.Duration(timeout - t.Kernel().MonotonicClock().Now().Nanoseconds())
-			if remaining <= 0 {
-				break
-			}
-			pause = min(pause, remaining)
+		now := t.Kernel().MonotonicClock().Now().Nanoseconds()
+		// The timeout is an absolute deadline, including negative values.
+		// Compare before subtracting to avoid overflow for expired deadlines.
+		if timeout <= now {
+			break
 		}
+		pause := min(100*time.Microsecond, time.Duration(timeout-now))
 		if _, blocked := t.BlockWithTimeout(nil, true, pause); blocked != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, blocked) {
 			err = linuxerr.ERESTARTSYS
 			break

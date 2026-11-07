@@ -14,7 +14,9 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <signal.h>
+#include <stddef.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -85,6 +87,31 @@ constexpr uint32_t kTimeoutInfinite = UINT32_MAX;
 constexpr uint32_t kWaitResultTimeout = 1;
 constexpr uint32_t kWaitResultFail = 2;
 
+struct DRMSyncobj {
+  uint32_t handle;
+  uint32_t flags;
+};
+
+struct DRMSyncobjTimelineWait {
+  uint64_t handles;
+  uint64_t points;
+  int64_t timeout_nsec;
+  uint32_t count_handles;
+  uint32_t flags;
+  uint32_t first_signaled;
+  uint32_t pad;
+  uint64_t deadline_nsec;
+};
+
+constexpr unsigned long kSyncobjCreate = _IOWR('d', 0xbf, DRMSyncobj);
+constexpr unsigned long kSyncobjDestroy = _IOWR('d', 0xc0, DRMSyncobj);
+constexpr unsigned long kTimelineWait =
+    _IOWR('d', 0xca, DRMSyncobjTimelineWait);
+constexpr unsigned long kTimelineWaitV1 =
+    _IOC(_IOC_READ | _IOC_WRITE, 'd', 0xca, 40);
+constexpr uint32_t kSyncobjCreateSignaled = 1;
+constexpr uint32_t kWaitForSubmit = 2;
+
 TEST(KFDTest, ProcessOwnership) {
   const FileDescriptor fd(open("/dev/kfd", O_RDWR | O_CLOEXEC));
   SKIP_IF(fd.get() < 0 && (errno == ENOENT || errno == ENODEV));
@@ -117,6 +144,79 @@ TEST(KFDTest, ProcessOwnership) {
                 IsPosixErrorOkAndHolds(0));
   }
   EXPECT_THAT(ioctl(fd.get(), kGetVersion, &version), SyscallSucceeds());
+}
+
+TEST(KFDTest, RenderTimelineWaitExpired) {
+  glob_t nodes = {};
+  const int found = glob("/dev/dri/renderD*", 0, nullptr, &nodes);
+  const auto free_nodes = Cleanup([&] { globfree(&nodes); });
+  SKIP_IF(found == GLOB_NOMATCH);
+  ASSERT_EQ(found, 0);
+
+  struct sigaction sa = {};
+  sa.sa_handler = +[](int) {};
+  sigemptyset(&sa.sa_mask);
+  const auto restore_action =
+      ASSERT_NO_ERRNO_AND_VALUE(ScopedSigaction(SIGUSR1, sa));
+  const auto restore_mask =
+      ASSERT_NO_ERRNO_AND_VALUE(ScopedSignalMask(SIG_UNBLOCK, SIGUSR1));
+  const pid_t pid = getpid();
+  const pid_t tid = gettid();
+  bool tested = false;
+  for (size_t i = 0; i < nodes.gl_pathc; ++i) {
+    SCOPED_TRACE(nodes.gl_pathv[i]);
+    const FileDescriptor fd(open(nodes.gl_pathv[i], O_RDWR | O_CLOEXEC));
+    if (fd.get() < 0 &&
+        (errno == EACCES || errno == ENODEV || errno == ENOENT)) {
+      continue;
+    }
+    ASSERT_THAT(fd.get(), SyscallSucceeds());
+    for (uint32_t flags : {0u, kSyncobjCreateSignaled}) {
+      DRMSyncobj object = {0, flags};
+      const int ret = ioctl(fd.get(), kSyncobjCreate, &object);
+      if (ret < 0 && (errno == EOPNOTSUPP || errno == ENOTTY)) {
+        break;
+      }
+      ASSERT_THAT(ret, SyscallSucceeds());
+      const auto destroy = Cleanup([&] {
+        DRMSyncobj args = {object.handle, 0};
+        EXPECT_THAT(ioctl(fd.get(), kSyncobjDestroy, &args), SyscallSucceeds());
+      });
+      tested = true;
+      for (unsigned long cmd : {kTimelineWaitV1, kTimelineWait}) {
+        for (int64_t timeout : {int64_t{-1}, INT64_MIN}) {
+          SCOPED_TRACE(::testing::Message() << "cmd=" << cmd << " flags="
+                                            << flags << " timeout=" << timeout);
+          uint64_t point = 0;
+          DRMSyncobjTimelineWait wait = {};
+          wait.handles = reinterpret_cast<uintptr_t>(&object.handle);
+          wait.points = reinterpret_cast<uintptr_t>(&point);
+          wait.timeout_nsec = timeout;
+          wait.count_handles = 1;
+          wait.flags = kWaitForSubmit;
+          // Bound the test if an expired deadline incorrectly blocks.
+          std::atomic<bool> done = false;
+          ScopedThread signal([&] {
+            absl::SleepFor(absl::Milliseconds(100));
+            while (!done.load(std::memory_order_relaxed)) {
+              EXPECT_THAT(tgkill(pid, tid, SIGUSR1), SyscallSucceeds());
+              absl::SleepFor(absl::Milliseconds(100));
+            }
+          });
+          if (flags == kSyncobjCreateSignaled) {
+            EXPECT_THAT(ioctl(fd.get(), cmd, &wait), SyscallSucceeds());
+          } else {
+            EXPECT_THAT(ioctl(fd.get(), cmd, &wait),
+                        SyscallFailsWithErrno(ETIME));
+          }
+          done.store(true, std::memory_order_relaxed);
+          signal.Join();
+          EXPECT_EQ(wait.timeout_nsec, timeout);
+        }
+      }
+    }
+  }
+  SKIP_IF(!tested);
 }
 
 using KFDWaitEventsTest = ::testing::TestWithParam<std::tuple<uint32_t, bool>>;
