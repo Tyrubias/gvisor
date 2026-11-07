@@ -89,6 +89,25 @@ struct KFDExportDMABuf {
 
 constexpr unsigned long kExportDMABuf = _IOWR('K', 0x24, KFDExportDMABuf);
 
+struct KFDIPCExportHandle {
+  uint64_t handle;
+  uint32_t share_handle[4];
+  uint32_t gpu_id;
+  uint32_t flags;
+};
+
+struct KFDIPCImportHandle {
+  uint64_t handle;
+  uint64_t va_addr;
+  uint64_t mmap_offset;
+  uint32_t share_handle[4];
+  uint32_t gpu_id;
+  uint32_t flags;
+};
+
+constexpr unsigned long kIPCExport = _IOWR('K', 0x81, KFDIPCExportHandle);
+constexpr unsigned long kIPCImport = _IOWR('K', 0x80, KFDIPCImportHandle);
+
 struct KFDCreateEvent {
   uint64_t event_page_offset;
   uint32_t event_trigger_data;
@@ -253,6 +272,73 @@ PosixErrorOr<FileDescriptor> AcquireKFDVM(int fd, uint32_t* gpu_id) {
     }
   }
   return PosixError(ENODEV, "No accessible KFD GPU");
+}
+
+TEST(KFDTest, IPCHandleLifetime) {
+  const FileDescriptor fd(open("/dev/kfd", O_RDWR | O_CLOEXEC));
+  SKIP_IF(fd.get() < 0 && (errno == ENOENT || errno == ENODEV));
+  ASSERT_THAT(fd.get(), SyscallSucceeds());
+  uint32_t gpu_id = 0;
+  auto render_or = AcquireKFDVM(fd.get(), &gpu_id);
+  SKIP_IF(!render_or.ok() && render_or.error().errno_value() == ENODEV);
+  const FileDescriptor render = ASSERT_NO_ERRNO_AND_VALUE(std::move(render_or));
+
+  constexpr size_t size = 65536;
+  void* pages =
+      mmap(nullptr, size * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(pages, MAP_FAILED);
+  const auto unmap =
+      Cleanup([&] { EXPECT_THAT(munmap(pages, size * 3), SyscallSucceeds()); });
+  uint64_t handles[3] = {};
+  const auto free_memory = Cleanup([&] {
+    for (auto handle : handles) {
+      if (handle != 0) {
+        kfd_ioctl_free_memory_of_gpu_args args = {handle};
+        EXPECT_THAT(ioctl(fd.get(), AMDKFD_IOC_FREE_MEMORY_OF_GPU, &args),
+                    SyscallSucceeds());
+      }
+    }
+  });
+  kfd_ioctl_alloc_memory_of_gpu_args alloc = {};
+  alloc.va_addr = reinterpret_cast<uintptr_t>(pages);
+  alloc.size = size;
+  alloc.gpu_id = gpu_id;
+  alloc.flags = KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE;
+  ASSERT_THAT(ioctl(fd.get(), AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &alloc),
+              SyscallSucceeds());
+  handles[0] = alloc.handle;
+  KFDIPCExportHandle exported = {};
+  exported.handle = handles[0];
+  exported.gpu_id = gpu_id;
+  const int ret = ioctl(fd.get(), kIPCExport, &exported);
+  SKIP_IF(ret < 0 && errno == ENOTTY);
+  ASSERT_THAT(ret, SyscallSucceeds());
+
+  KFDIPCImportHandle imported = {};
+  for (int i = 1; i < 3; ++i) {
+    imported = {};
+    imported.va_addr = reinterpret_cast<uintptr_t>(pages) + i * size;
+    imported.gpu_id = gpu_id;
+    for (int j = 0; j < 4; ++j) {
+      imported.share_handle[j] = exported.share_handle[j];
+    }
+    ASSERT_THAT(ioctl(fd.get(), kIPCImport, &imported), SyscallSucceeds());
+    handles[i] = imported.handle;
+    if (i == 1) {
+      kfd_ioctl_free_memory_of_gpu_args args = {handles[0]};
+      ASSERT_THAT(ioctl(fd.get(), AMDKFD_IOC_FREE_MEMORY_OF_GPU, &args),
+                  SyscallSucceeds());
+      handles[0] = 0;
+    }
+  }
+  for (int i = 1; i < 3; ++i) {
+    kfd_ioctl_free_memory_of_gpu_args args = {handles[i]};
+    ASSERT_THAT(ioctl(fd.get(), AMDKFD_IOC_FREE_MEMORY_OF_GPU, &args),
+                SyscallSucceeds());
+    handles[i] = 0;
+  }
+  EXPECT_THAT(ioctl(fd.get(), kIPCImport, &imported),
+              SyscallFailsWithErrno(EINVAL));
 }
 
 TEST(KFDTest, ReopenWithQueue) {

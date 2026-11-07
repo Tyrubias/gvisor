@@ -45,7 +45,7 @@ import (
 // Register registers the granted devices. gpuIDs maps DRM render minors to
 // their KFD GPU IDs.
 func Register(vfsObj *vfs.VirtualFilesystem, devices []hostamdgpu.Device, gpuIDs map[uint32]uint32) error {
-	p := &proxy{gpus: make(map[uint32]bool), contexts: make(map[platform.AddressSpace]*deviceContext), ipcHandles: make(map[amdgpu.KFDIPCShareHandle]uint64)}
+	p := &proxy{gpus: make(map[uint32]bool), contexts: make(map[platform.AddressSpace]*deviceContext), ipcHandles: make(map[amdgpu.KFDIPCShareHandle]ipcHandle)}
 	for _, d := range devices {
 		dev := &device{proxy: p, path: strings.TrimPrefix(d.Path, "/dev/"), kfd: d.Path == "/dev/kfd", gpuID: gpuIDs[d.Minor]}
 		if !dev.kfd {
@@ -70,7 +70,7 @@ type proxy struct {
 	contexts map[platform.AddressSpace]*deviceContext `state:"nosave"`
 	// ipcHandles records trusted exports and their allocation sizes.
 	// +checklocks:mu
-	ipcHandles map[amdgpu.KFDIPCShareHandle]uint64 `state:"nosave"`
+	ipcHandles map[amdgpu.KFDIPCShareHandle]ipcHandle `state:"nosave"`
 }
 
 type deviceContext struct {
@@ -164,9 +164,7 @@ func (c *deviceContext) release() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, a := range c.allocations {
-		if a.userptr != nil {
-			a.userptr.release()
-		}
+		c.proxy.releaseAllocation(a)
 	}
 	c.allocations = nil
 	if c.kfd >= 0 {
@@ -180,8 +178,9 @@ func (p *proxy) beforeSave() {
 }
 
 type allocation struct {
-	size    uint64
-	userptr *userMemory
+	size      uint64
+	userptr   *userMemory
+	ipcHandle *amdgpu.KFDIPCShareHandle
 }
 
 func (fd *deviceFD) checkOwner(t *kernel.Task) error {

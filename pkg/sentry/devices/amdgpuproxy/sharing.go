@@ -23,6 +23,59 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
 
+// ipcHandle records an IPC object's size and its allocation references.
+// Exporting the same allocation again does not create another reference.
+type ipcHandle struct {
+	size uint64
+	refs uint64
+}
+
+func (p *proxy) trackIPCHandle(a *allocation, handle amdgpu.KFDIPCShareHandle) {
+	if a.ipcHandle != nil {
+		return
+	}
+	p.mu.Lock()
+	h := p.ipcHandles[handle]
+	h.size = a.size
+	h.refs++
+	p.ipcHandles[handle] = h
+	p.mu.Unlock()
+	a.ipcHandle = &handle
+}
+
+func (p *proxy) retainIPCHandle(handle amdgpu.KFDIPCShareHandle) (uint64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h, ok := p.ipcHandles[handle]
+	if !ok {
+		return 0, false
+	}
+	h.refs++
+	p.ipcHandles[handle] = h
+	return h.size, true
+}
+
+func (p *proxy) releaseIPCHandle(handle amdgpu.KFDIPCShareHandle) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h := p.ipcHandles[handle]
+	if h.refs <= 1 {
+		delete(p.ipcHandles, handle)
+	} else {
+		h.refs--
+		p.ipcHandles[handle] = h
+	}
+}
+
+func (p *proxy) releaseAllocation(a *allocation) {
+	if a.userptr != nil {
+		a.userptr.release()
+	}
+	if a.ipcHandle != nil {
+		p.releaseIPCHandle(*a.ipcHandle)
+	}
+}
+
 func (fd *deviceFD) exportDMABuf(t *kernel.Task, addr hostarch.Addr) error {
 	const cmd = amdgpu.AMDKFD_IOC_EXPORT_DMABUF
 	var v amdgpu.KFDExportDMABuf
@@ -124,16 +177,14 @@ func (fd *deviceFD) exportIPC(t *kernel.Task, addr hostarch.Addr) error {
 		c.mu.Unlock()
 		return linuxerr.EINVAL
 	}
-	size := a.size
 	err := fd.call(t, cmd, &v)
-	c.mu.Unlock()
 	if err != nil {
+		c.mu.Unlock()
 		return err
 	}
 	p := fd.dev.proxy
-	p.mu.Lock()
-	p.ipcHandles[v.ShareHandle] = size
-	p.mu.Unlock()
+	p.trackIPCHandle(a, v.ShareHandle)
+	c.mu.Unlock()
 	return copyOut(t, cmd, addr, &v, nil)
 }
 
@@ -147,9 +198,10 @@ func (fd *deviceFD) importIPC(t *kernel.Task, addr hostarch.Addr) error {
 	if !p.gpus[v.GPUID] {
 		return linuxerr.EINVAL
 	}
-	p.mu.Lock()
-	size, ok := p.ipcHandles[v.ShareHandle]
-	p.mu.Unlock()
+	// Keep authorization alive across the host import, including when the
+	// last allocation reference is freed concurrently.
+	handle := v.ShareHandle
+	size, ok := p.retainIPCHandle(handle)
 	if !ok {
 		return linuxerr.EINVAL
 	}
@@ -157,8 +209,11 @@ func (fd *deviceFD) importIPC(t *kernel.Task, addr hostarch.Addr) error {
 	c.mu.Lock()
 	err := fd.call(t, cmd, &v)
 	if err == nil {
-		c.allocations[v.Handle] = &allocation{size: size}
+		c.allocations[v.Handle] = &allocation{size: size, ipcHandle: &handle}
 	}
 	c.mu.Unlock()
+	if err != nil {
+		p.releaseIPCHandle(handle)
+	}
 	return copyOut(t, cmd, addr, &v, err)
 }

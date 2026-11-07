@@ -81,6 +81,8 @@ render devices, as it does with native device cgroups.
 
 KFD legacy IPC imports accept only handles captured from exports inside the
 sandbox. The registry covers all application processes and granted GPUs.
+It retains each record while allocations or pending imports reference it,
+including imported allocations, and removes the record after the last reference.
 A driver import still enforces the exported allocation's native lifetime.
 
 KFD and DRM PRIME dma-buf exports create guest file descriptions. Imports

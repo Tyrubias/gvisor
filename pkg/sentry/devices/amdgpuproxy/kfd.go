@@ -381,9 +381,7 @@ func (fd *deviceFD) freeMemory(t *kernel.Task, addr hostarch.Addr) error {
 		return err
 	}
 	if a := p.allocations[v.Handle]; a != nil {
-		if a.userptr != nil {
-			a.userptr.release()
-		}
+		p.proxy.releaseAllocation(a)
 		delete(p.allocations, v.Handle)
 	}
 	return nil

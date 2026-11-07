@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "go_library")
+load("//tools:defs.bzl", "go_library", "go_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -39,4 +39,12 @@ go_library(
         "//pkg/usermem",
         "@org_golang_x_sys//unix:go_default_library",
     ],
+)
+
+go_test(
+    name = "amdgpuproxy_test",
+    size = "small",
+    srcs = ["sharing_test.go"],
+    embed = [":amdgpuproxy"],
+    deps = ["//pkg/abi/amdgpu"],
 )
