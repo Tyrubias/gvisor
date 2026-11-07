@@ -130,11 +130,10 @@ func (fd *deviceFD) primeHandleToFD(t *kernel.Task, addr hostarch.Addr) error {
 		return err
 	}
 	v.FD = guestFD
-	if _, err := v.CopyOut(t, addr); err != nil {
-		removeFD(t, guestFD)
-		return err
-	}
-	return nil
+	// DRM installs the descriptor before copying the arguments out. It
+	// remains open if that copy fails.
+	_, err = v.CopyOut(t, addr)
+	return err
 }
 
 func (fd *deviceFD) primeFDToHandle(t *kernel.Task, addr hostarch.Addr) error {

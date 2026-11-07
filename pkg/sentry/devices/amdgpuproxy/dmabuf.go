@@ -99,9 +99,3 @@ func (p *proxy) getDMABufFD(t *kernel.Task, guestFD int32) (*vfs.FileDescription
 	}
 	return f, fd.hostFD, nil
 }
-
-func removeFD(t *kernel.Task, guestFD int32) {
-	if f := t.FDTable().Remove(t, guestFD); f != nil {
-		f.DecRef(t)
-	}
-}

@@ -220,13 +220,13 @@ func (d *device) Open(ctx context.Context, mnt *vfs.Mount, dent *vfs.Dentry, opt
 	var hostFD int
 	if d.kfd {
 		c.mu.Lock()
-		if c.group == nil {
-			c.group = t.ThreadGroup()
-		}
 		io := c.as.(platform.HostDeviceIO)
 		var opened int32
 		opened, err = io.OpenHostDevice("/dev/kfd", opts.Flags&(unix.O_ACCMODE|unix.O_NONBLOCK)|unix.O_CLOEXEC)
 		if err == nil {
+			if c.group == nil {
+				c.group = t.ThreadGroup()
+			}
 			if err = c.initKFD(opened); err != nil {
 				_ = unix.Close(int(opened))
 			}

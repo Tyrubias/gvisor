@@ -40,11 +40,10 @@ func (fd *deviceFD) exportDMABuf(t *kernel.Task, addr hostarch.Addr) error {
 		return err
 	}
 	v.DMABufFD = uint32(guestFD)
-	if _, err := v.CopyOut(t, addr); err != nil {
-		removeFD(t, guestFD)
-		return err
-	}
-	return nil
+	// KFD installs the descriptor before copying the arguments out. It
+	// remains open if that copy fails.
+	_, err = v.CopyOut(t, addr)
+	return err
 }
 
 func (fd *deviceFD) importDMABuf(t *kernel.Task, addr hostarch.Addr) error {

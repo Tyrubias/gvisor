@@ -12,6 +12,9 @@ leader. The proxy opens KFD and executes its ioctls in the application's
 canonical systrap syscall thread. Each application address space has its own
 KFD context and allocation table. Threads share that context. A forked child
 must open its own KFD descriptor; using its parent's descriptor returns `EBADF`.
+Processes that share an address space with `CLONE_VM` but have different thread
+groups share the host KFD context. Only the thread group that first opens KFD
+successfully can use that context.
 
 Systrap shares its host descriptor table with the Sentry. Guest descriptors
 refer to VFS file descriptions that own the corresponding host descriptors.
@@ -31,10 +34,13 @@ proxy consumes only the wait status, and serializes these calls with protected
 operations. Nonblocking polls with interruptible sleeps let other application
 threads and address-space operations progress.
 
-An address space with device context is destroyed when its application exits;
-it is not returned to the systrap pool. KFD's MMU release notifier tears down
-its queues. The proxy then releases its references to registered application
-memory, including allocations that the application did not explicitly free.
+An address space with a device context is destroyed when its last application
+user exits or replaces it with exec; it is not returned to the systrap pool.
+The proxy retains a KFD descriptor and destroys tracked queues before removing
+application mappings, even if the application has closed all KFD descriptors.
+After the host address space exits, the proxy releases its references to
+registered application memory, including allocations that the application did
+not explicitly free.
 
 ## Memory
 
@@ -87,3 +93,10 @@ that request SVM must use its fallback, for example with `HSA_USE_SVM=0` and
 `HSA_XNACK=0`. Event waits remain interruptible; wait-for-all on multiple KFD
 events is rejected. The application must have a writable temporary directory
 for ROCm code loading.
+
+KFD descriptors retained across exec cannot be used for ioctls or mmap and
+return `EBADF`. The new program must open KFD again. Native Linux accepts some
+operations on a retained descriptor, including `GET_VERSION` when the same
+thread-group leader executes the new program. The proxy cannot forward these
+operations after destroying the descriptor's original host address space.
+Render-node and dma-buf descriptors can remain usable across exec.
