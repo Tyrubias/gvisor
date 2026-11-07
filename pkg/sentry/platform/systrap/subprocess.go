@@ -183,7 +183,7 @@ type subprocess struct {
 	// +checklocks:syscallThreadMu
 	hostDeviceScratchRange memmap.FileRange
 	// +checklocks:syscallThreadMu
-	hostDeviceQuiesce []func()
+	hostDeviceQuiesce []func() error
 	// +checklocks:syscallThreadMu
 	hostDeviceCleanups []func()
 
@@ -219,6 +219,9 @@ type subprocess struct {
 	// creation may have left aliases of recycled stack backing in this mm.
 	// Protected by syscallThreadMu.
 	hostMMUnsafe bool
+
+	// +checklocks:syscallThreadMu
+	hostDeviceQuiesceErr error
 }
 
 var seccompNotifyIsSupported = false
@@ -557,11 +560,14 @@ func (s *subprocess) unmap() {
 }
 
 // Release makes the subprocess available for reuse, or cleans it up if it died
-// an unexpected death.
+// an unexpected death. A device that cannot quiesce retains its host mm.
 func (s *subprocess) Release() {
 	if s.alive() {
 		if s.hostMMBound.Load() {
-			s.quiesceHostDevices()
+			if err := s.QuiesceHostDevices(); err != nil {
+				log.Warningf("Retaining host device address space after failed quiescence: %v", err)
+				return
+			}
 		}
 		s.unmap()
 	} else if s.hostMMBound.Load() {

@@ -260,6 +260,11 @@ type MemoryManager struct {
 	//
 	// +checkatomic
 	membarrierRSeqEnabled atomicbitops.Uint32
+
+	// retainedPMAs keeps device-accessible backing alive after failed device
+	// quiescence. These references survive PMA invalidation and removal.
+	// +checklocks:activeMu
+	retainedPMAs []PinnedRange `state:"nosave"`
 }
 
 // vma represents a virtual memory area.

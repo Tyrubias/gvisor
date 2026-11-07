@@ -431,7 +431,8 @@ func (mm *MemoryManager) IncUsers() bool {
 }
 
 // DecUsers decrements mm's user count. If the user count reaches 0, all
-// mappings in mm are unmapped.
+// mappings in mm are unmapped. Device-accessible backing is retained if
+// device quiescence fails.
 //
 // +checklocksexclude:mm.aioManager.mu
 // +checklocksexclude:mm.metadataMu
@@ -458,7 +459,24 @@ func (mm *MemoryManager) DecUsers(ctx context.Context) {
 	mm.activeMu.Lock()
 	// Make sure the AddressSpace is returned.
 	if mm.as != nil {
-		mm.as.Release()
+		var err error
+		if io, ok := mm.as.(platform.HostDeviceIO); ok {
+			err = io.QuiesceHostDevices()
+		}
+		if err != nil {
+			// Queue pointers can reference backing outside explicit USERPTR
+			// registrations. Retain every mapped range before dropping PMAs,
+			// and leave the host mm alive with its mappings unchanged.
+			memCgID := pgalloc.MemoryCgroupIDFromContext(ctx)
+			for pseg := mm.pmas.FirstSegment(); pseg.Ok(); pseg = pseg.NextSegment() {
+				file, fr := pseg.ValuePtr().file, pseg.fileRange()
+				file.IncRef(fr, memCgID)
+				mm.retainedPMAs = append(mm.retainedPMAs, PinnedRange{Source: pseg.Range(), File: file, Offset: fr.Start})
+			}
+			ctx.Warningf("Retaining host device address space and mapped backing after failed quiescence: %v", err)
+		} else {
+			mm.as.Release()
+		}
 		mm.as = nil
 	}
 	mm.activeMu.Unlock()

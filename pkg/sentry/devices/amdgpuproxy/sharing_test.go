@@ -17,8 +17,41 @@ package amdgpuproxy
 import (
 	"testing"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/amdgpu"
+	"gvisor.dev/gvisor/pkg/errors/linuxerr"
+	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
+
+type queueDeviceIO struct {
+	platform.AddressSpace
+	platform.HostDeviceIO
+	results map[uint32]error
+	calls   int
+}
+
+func (io *queueDeviceIO) IoctlHostDevice(_ int32, _ uint32, buf []byte, _ ...platform.HostIoctlBuffer) (uintptr, error) {
+	var v amdgpu.KFDDestroyQueue
+	v.UnmarshalBytes(buf)
+	io.calls++
+	return 0, io.results[v.QueueID]
+}
+
+func TestQueueQuiesce(t *testing.T) {
+	io := &queueDeviceIO{results: map[uint32]error{2: unix.EINVAL, 3: linuxerr.EINVAL, 4: unix.EIO}}
+	c := &deviceContext{as: io, queues: map[uint32]struct{}{1: {}, 2: {}, 3: {}, 4: {}}}
+	if err := c.quiesce(); err == nil {
+		t.Fatal("quiesce succeeded despite EIO")
+	}
+	if io.calls != 4 {
+		t.Fatalf("attempted %d queue destroys, want 4", io.calls)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, failed := c.queues[4]; len(c.queues) != 1 || !failed {
+		t.Fatalf("retained queue IDs %v, want only 4", c.queues)
+	}
+}
 
 func TestIPCHandleReferences(t *testing.T) {
 	p := &proxy{ipcHandles: make(map[amdgpu.KFDIPCShareHandle]ipcHandle)}

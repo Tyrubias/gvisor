@@ -318,12 +318,13 @@ func TestHostDeviceIO(t *testing.T) {
 		t.Fatal(err)
 	}
 	quiesced, released := false, false
-	if err := s.OnHostDeviceRelease(func() {
+	if err := s.OnHostDeviceRelease(func() error {
 		var params [4]byte
 		if _, err := s.IoctlHostDevice(int32(r.Fd()), unix.TIOCINQ, params[:]); err != nil || hostarch.ByteOrder.Uint32(params[:]) != 3 {
 			t.Fatalf("TIOCINQ during quiesce: got %v, %v; want 3 bytes", err, params)
 		}
 		quiesced = true
+		return nil
 	}, func() {
 		if !quiesced || !s.dead.Load() {
 			t.Error("cleanup ran before device context destruction")
@@ -345,6 +346,34 @@ func TestHostDeviceIO(t *testing.T) {
 	s.DecRef(s.release)
 	if !released || !s.dead.Load() {
 		t.Fatal("device context was not destroyed")
+	}
+
+	failedAS, err := p.NewAddressSpace(platform.AddressSpaceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := failedAS.(*subprocess)
+	cleaned, attempts := false, 0
+	if err := failed.OnHostDeviceRelease(func() error {
+		attempts++
+		return unix.EIO
+	}, func() { cleaned = true }); err != nil {
+		t.Fatal(err)
+	}
+	failed.Release()
+	if cleaned || failed.dead.Load() {
+		t.Fatal("failed device quiescence released its host mm or backing")
+	}
+	if err := failed.QuiesceHostDevices(); err != unix.EIO || attempts != 1 {
+		t.Fatalf("quiescence failure was not retained: %v after %d attempts", err, attempts)
+	}
+	// This fake device retains no work. Permit its host mm to be destroyed.
+	failed.syscallThreadMu.Lock()
+	failed.hostDeviceQuiesceErr = nil
+	failed.syscallThreadMu.Unlock()
+	failed.Release()
+	if !cleaned || !failed.dead.Load() {
+		t.Fatal("fake device context was not destroyed")
 	}
 }
 

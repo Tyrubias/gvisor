@@ -41,17 +41,24 @@ type HostDeviceIO interface {
 	// arguments exceed the platform's scratch capacity.
 	IoctlHostDeviceFlat(hostFD int32, request uint32, buf []byte, nested ...HostIoctlBuffer) (HostIoctlResult, error)
 
+	// QuiesceHostDevices stops device access to application mappings before
+	// releasing the address space. On error, the address space and references
+	// to all mapped backing must be retained. Release must not be called.
+	// It must not run concurrently with release or callback registration.
+	QuiesceHostDevices() error
+
 	// OnHostDeviceRelease registers two phases of address-space cleanup.
 	// Quiesce runs before application mappings are removed and must stop device
-	// access to them. It may call IoctlHostDevice, but must not access the
-	// MemoryManager's mappings. Cleanup runs after the host device context has
-	// been destroyed, before the platform releases its backing memory. It must
-	// not access the AddressSpace or its MemoryManager's mappings.
+	// access to them or return an error. It may call IoctlHostDevice, but must
+	// not access the MemoryManager's mappings. Cleanup runs after the host
+	// device context has been destroyed, before the platform releases its
+	// backing memory. It must not access the AddressSpace or its MemoryManager's
+	// mappings.
 	//
 	// The platform invokes both callbacks without holding its locks. Callbacks
 	// may run with MemoryManager locks held and must not acquire filesystem
 	// locks, including by releasing VFS file descriptions.
-	OnHostDeviceRelease(quiesce, cleanup func()) error
+	OnHostDeviceRelease(quiesce func() error, cleanup func()) error
 }
 
 // HostIoctlBuffer describes an ioctl's nested buffer. PointerOffset locates

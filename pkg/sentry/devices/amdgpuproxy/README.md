@@ -34,13 +34,16 @@ proxy consumes only the wait status, and serializes these calls with protected
 operations. Nonblocking polls with interruptible sleeps let other application
 threads and address-space operations progress.
 
-An address space with a device context is destroyed when its last application
-user exits or replaces it with exec; it is not returned to the systrap pool.
+An address space with a device context is not returned to the systrap pool.
 The proxy retains a host KFD descriptor and destroys tracked queues before
 removing application mappings, even if the application has closed all KFD
 descriptors.
 This reference is independent of guest file descriptions, so address-space
 cleanup does not enter VFS while memory-management locks are held.
+If queue destruction fails, the proxy retains the host mm, device context and
+references to all mapped backing until the sandbox exits. This prevents device
+access to recycled backing without terminating other sandbox processes. These
+resources are not reclaimed automatically after the device recovers.
 After the host address space exits, the proxy releases its references to
 registered application memory, including allocations that the application did
 not explicitly free.
@@ -68,9 +71,9 @@ XNACK are rejected.
 
 ## Admission and discovery
 
-The proxy admits a fixed ioctl set, also installed in the source stub's
-seccomp filter. It copies and bounds nested buffers, translates guest
-identifiers, and checks GPU IDs against the render nodes granted to the
+The proxy admits a fixed ioctl set. Each process's seccomp filter permits the
+operations routed through that process. The proxy copies and bounds nested
+buffers, translates guest identifiers, and checks GPU IDs against the render nodes granted to the
 sandbox. Other requests return `ENOTTY`.
 
 The sandbox's `/sys` contains a snapshot of KFD topology and the PCI identity

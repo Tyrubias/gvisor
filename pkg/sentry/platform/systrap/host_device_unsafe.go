@@ -80,7 +80,7 @@ func (s *subprocess) IoctlHostDevice(hostFD int32, request uint32, buf []byte, n
 }
 
 // OnHostDeviceRelease implements platform.HostDeviceIO.
-func (s *subprocess) OnHostDeviceRelease(quiesce, cleanup func()) error {
+func (s *subprocess) OnHostDeviceRelease(quiesce func() error, cleanup func()) error {
 	return s.withAliveRLock(func() error {
 		s.syscallThreadMu.Lock()
 		defer s.syscallThreadMu.Unlock()
@@ -91,15 +91,28 @@ func (s *subprocess) OnHostDeviceRelease(quiesce, cleanup func()) error {
 	})
 }
 
-func (s *subprocess) quiesceHostDevices() {
+// QuiesceHostDevices implements platform.HostDeviceIO.
+func (s *subprocess) QuiesceHostDevices() error {
+	if !s.hostMMBound.Load() {
+		return nil
+	}
 	s.syscallThreadMu.Lock()
 	quiesce := s.hostDeviceQuiesce
+	err := s.hostDeviceQuiesceErr
 	s.hostDeviceQuiesce = nil
 	s.syscallThreadMu.Unlock()
 	// Device operations take syscallThreadMu on the request goroutine.
 	for _, fn := range quiesce {
-		fn()
+		if e := fn(); e != nil && err == nil {
+			err = e
+		}
 	}
+	if err != nil {
+		s.syscallThreadMu.Lock()
+		s.hostDeviceQuiesceErr = err
+		s.syscallThreadMu.Unlock()
+	}
+	return err
 }
 
 func (s *subprocess) hostDeviceRequest(r *hostDeviceRequest) hostDeviceReply {

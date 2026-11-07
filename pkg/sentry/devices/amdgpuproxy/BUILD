@@ -46,5 +46,10 @@ go_test(
     size = "small",
     srcs = ["sharing_test.go"],
     embed = [":amdgpuproxy"],
-    deps = ["//pkg/abi/amdgpu"],
+    deps = [
+        "//pkg/abi/amdgpu",
+        "//pkg/errors/linuxerr",
+        "//pkg/sentry/platform",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
 )

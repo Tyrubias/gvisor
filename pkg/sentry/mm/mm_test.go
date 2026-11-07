@@ -72,6 +72,62 @@ func testMemoryManager(ctx context.Context, t *testing.T) *MemoryManager {
 	return testMemoryManagerWithMmapDirection(ctx, t, arch.MmapBottomUp)
 }
 
+type failedDeviceAddressSpace struct {
+	platform.AddressSpace
+	platform.HostDeviceIO
+	released bool
+}
+
+func (*failedDeviceAddressSpace) QuiesceHostDevices() error {
+	return linuxerr.EIO
+}
+
+func (as *failedDeviceAddressSpace) Release() {
+	as.released = true
+	as.AddressSpace.Release()
+}
+
+func TestFailedDeviceQuiesceRetainsBacking(t *testing.T) {
+	ctx := contexttest.Context(t)
+	mm := testMemoryManager(ctx, t)
+	addr, err := mm.MMap(ctx, memmap.MMapOpts{
+		Length: pageSize, Private: true, Perms: hostarch.ReadWrite, MaxPerms: hostarch.AnyAccess,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("retained device backing")
+	if _, err := mm.CopyOut(ctx, addr, data, usermem.IOOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	mm.activeMu.Lock()
+	as := &failedDeviceAddressSpace{AddressSpace: mm.as}
+	mm.as = as
+	mm.activeMu.Unlock()
+	mm.DecUsers(ctx)
+	if as.released {
+		t.Fatal("host mm released after failed device quiescence")
+	}
+	// The fake device has no outstanding access. Release its retained state.
+	mm.activeMu.Lock()
+	prs := mm.retainedPMAs
+	mm.retainedPMAs = nil
+	if mm.as != nil || !mm.pmas.IsEmpty() {
+		t.Error("memory manager retained active platform mappings")
+	}
+	mm.activeMu.Unlock()
+	defer func() {
+		as.AddressSpace.Release()
+		Unpin(prs)
+	}()
+	if len(prs) != 1 {
+		t.Fatalf("retained %d ranges, want 1", len(prs))
+	}
+	if got := readPinnedRange(t, prs[0]); !bytes.Equal(got[:len(data)], data) {
+		t.Errorf("retained backing contains %q, want %q", got[:len(data)], data)
+	}
+}
+
 // +checklocksexclude:mm.mappingMu
 func (mm *MemoryManager) realUsageAS() uint64 {
 	mm.mappingMu.RLock()

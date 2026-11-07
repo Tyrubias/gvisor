@@ -112,10 +112,11 @@ func (p *proxy) context(t *kernel.Task) (*deviceContext, error) {
 	return c, nil
 }
 
-func (c *deviceContext) quiesce() {
+func (c *deviceContext) quiesce() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	io := c.as.(platform.HostDeviceIO)
+	var firstErr error
 	for id := range c.queues {
 		v := amdgpu.KFDDestroyQueue{QueueID: id}
 		var buf [8]byte
@@ -123,11 +124,15 @@ func (c *deviceContext) quiesce() {
 		_, err := io.IoctlHostDevice(c.kfd, amdgpu.AMDKFD_IOC_DESTROY_QUEUE, buf[:])
 		// A failed application destroy can still remove the queue. EINVAL
 		// means that this trusted queue ID is no longer present.
-		if err != nil && err != unix.EINVAL {
-			panic(fmt.Sprintf("cannot stop KFD queue %d before unmapping its address space: %v", id, err))
+		if err != nil && !linuxerr.Equals(linuxerr.EINVAL, err) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("cannot stop KFD queue %d: %w", id, err)
+			}
+			continue
 		}
 		delete(c.queues, id)
 	}
+	return firstErr
 }
 
 // initKFD prevents GPU retry faults from populating platform-private VMAs.
