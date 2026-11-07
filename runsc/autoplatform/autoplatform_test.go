@@ -50,6 +50,8 @@ func TestChoosePlatform(t *testing.T) {
 		{name: "no kvm device uses systrap", available: []string{"systrap"}, want: "systrap"},
 		{name: "vm skips kvm", env: hostEnv{inVM: true}, available: all, want: "systrap"},
 		{name: "gpu skips kvm", env: hostEnv{hasNvidiaGPU: true}, available: all, want: "systrap"},
+		{name: "AMD GPU requires systrap", env: hostEnv{hasAMDGPU: true}, available: all, want: "systrap"},
+		{name: "AMD GPU cannot use kvm alone", env: hostEnv{hasAMDGPU: true}, available: []string{"kvm"}, want: ""},
 		{name: "nothing available", available: nil, want: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

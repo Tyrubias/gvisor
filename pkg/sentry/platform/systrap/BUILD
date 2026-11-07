@@ -132,6 +132,7 @@ go_test(
     # registration at process startup, as runsc does for the sentry.
     env = {"GLIBC_TUNABLES": "glibc.pthread.rseq=0"},
     deps = [
+        "//pkg/abi/linux",
         "//pkg/bpf",
         "//pkg/context",
         "//pkg/cpuid",

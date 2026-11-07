@@ -38,11 +38,13 @@ type hostEnv struct {
 	inVM bool
 	// hasNvidiaGPU is true if the container uses NVIDIA GPUs.
 	hasNvidiaGPU bool
+	// hasAMDGPU is true if the AMD GPU proxy is enabled.
+	hasAMDGPU bool
 }
 
 // String implements fmt.Stringer.
 func (e hostEnv) String() string {
-	return fmt.Sprintf("in VM: %t, NVIDIA GPU: %t", e.inVM, e.hasNvidiaGPU)
+	return fmt.Sprintf("in VM: %t, NVIDIA GPU: %t, AMD GPU: %t", e.inVM, e.hasNvidiaGPU, e.hasAMDGPU)
 }
 
 // autoPlatform is a platform that --platform=auto may choose. autoPlatforms
@@ -96,6 +98,7 @@ func detectHostEnv(conf *config.Config, spec *specs.Spec) hostEnv {
 	return hostEnv{
 		inVM:         inVM(),
 		hasNvidiaGPU: usesNvidiaGPU(spec, conf),
+		hasAMDGPU:    conf.AMDGPUProxy != config.AMDGPUProxyDisabled,
 	}
 }
 
@@ -116,6 +119,8 @@ func choosePlatform(env hostEnv, deviceFor deviceFunc, probe probeFunc) (name, d
 		}
 		var err error
 		switch {
+		case env.hasAMDGPU && p.name != "systrap":
+			err = errors.New("AMD GPU proxy requires systrap")
 		case p.skipInVM && env.inVM:
 			err = errors.New("inside a VM")
 		case p.skipForNvidiaGPU && env.hasNvidiaGPU:

@@ -19,12 +19,54 @@ import (
 	"slices"
 	"testing"
 
+	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/bpf"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/seccomp/precompiledseccomp"
 	"gvisor.dev/gvisor/pkg/sentry/platform/systrap/stubfilter"
 )
+
+func TestHostDeviceFilters(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		info := (&Systrap{hostDeviceIO: enabled}).SeccompInfo()
+		if enabled && info.ConfigKey() == (&Systrap{}).SeccompInfo().ConfigKey() {
+			t.Fatal("host device filters share the default seccomp cache key")
+		}
+		program := seccomp.Program{
+			RuleSets: []seccomp.RuleSet{{Rules: info.SyscallFilters(info.Variables()), Action: seccomp.Allow}},
+			Options:  seccomp.ProgramOptions{DefaultAction: seccomp.KillProcess},
+		}
+		insns, _, err := program.Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		compiled, err := bpf.Compile(insns, true /* optimize */)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range []struct {
+			args    [6]uint64
+			allowed bool
+		}{
+			{[6]uint64{unix.PTRACE_ATTACH, 123}, true},
+			{[6]uint64{unix.PTRACE_SEIZE, 123, 0, unix.PTRACE_O_EXITKILL}, enabled},
+			{[6]uint64{unix.PTRACE_INTERRUPT, 123}, enabled},
+			{[6]uint64{unix.PTRACE_SEIZE, 123, 0, unix.PTRACE_O_TRACECLONE}, false},
+			{[6]uint64{unix.PTRACE_INTERRUPT, 123, 1}, false},
+		} {
+			data := linux.SeccompData{Nr: unix.SYS_PTRACE, Arch: seccomp.LINUX_AUDIT_ARCH, Args: tc.args}
+			got, err := bpf.Exec[bpf.NativeEndian](compiled, seccomp.DataAsBPFInput(&data, make([]byte, data.SizeBytes())))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if allowed := got == uint32(linux.SECCOMP_RET_ALLOW); allowed != tc.allowed {
+				t.Errorf("HostDeviceIO=%t args=%#v: action=%#x, want allowed=%t", enabled, tc.args, got, tc.allowed)
+			}
+		}
+	}
+}
 
 // TestStubFilterPrecompiled checks that rendering the precompiled stub
 // programs yields the same bytecode as compiling them with the same values,

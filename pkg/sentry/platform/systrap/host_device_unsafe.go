@@ -135,6 +135,8 @@ func (s *subprocess) executeHostDeviceRequest(r *hostDeviceRequest) hostDeviceRe
 		t   *thread
 		sig uintptr
 	}
+	s.sysmsgThreadsMu.RLock()
+	defer s.sysmsgThreadsMu.RUnlock()
 	stoppedThreads := make([]stoppedThread, 0, len(s.sysmsgThreads))
 	defer func() {
 		for _, st := range stoppedThreads {

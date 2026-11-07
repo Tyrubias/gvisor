@@ -24,6 +24,7 @@ import (
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/ktime"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
 
@@ -453,9 +454,11 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 		}
 	}
 	ptr, timeout := v.EventsPtr, v.Timeout
-	var deadline time.Time
-	if timeout != amdgpu.KFD_EVENT_TIMEOUT_INFINITE {
-		deadline = time.Now().Add(time.Duration(min(timeout, 0x7fffffff)) * time.Millisecond)
+	clock := t.Kernel().MonotonicClock()
+	hasDeadline := timeout != amdgpu.KFD_EVENT_TIMEOUT_INFINITE
+	var deadline ktime.Time
+	if hasDeadline {
+		deadline = clock.Now().Add(time.Duration(min(timeout, 0x7fffffff)) * time.Millisecond)
 	}
 	buf := make([]byte, v.SizeBytes())
 	var err error
@@ -476,12 +479,12 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 		if result.Errno != 0 {
 			err = result.Errno
 		}
-		if err != nil || v.WaitResult != amdgpu.KFD_IOC_WAIT_RESULT_TIMEOUT || (!deadline.IsZero() && !time.Now().Before(deadline)) {
+		if err != nil || v.WaitResult != amdgpu.KFD_IOC_WAIT_RESULT_TIMEOUT || (hasDeadline && !clock.Now().Before(deadline)) {
 			break
 		}
 		pause := waitPollInterval
-		if !deadline.IsZero() {
-			pause = max(min(pause, time.Until(deadline)), 0)
+		if hasDeadline {
+			pause = max(min(pause, deadline.Sub(clock.Now())), 0)
 		}
 		if _, blocked := t.BlockWithTimeout(nil, true, pause); blocked != nil && !linuxerr.Equals(linuxerr.ETIMEDOUT, blocked) {
 			err = linuxerr.ERESTARTSYS
@@ -492,8 +495,8 @@ func (fd *deviceFD) waitEvents(t *kernel.Task, addr hostarch.Addr) error {
 	if err != nil {
 		v.WaitResult = amdgpu.KFD_IOC_WAIT_RESULT_FAIL
 		// A restarted finite wait gets its remaining timeout.
-		if linuxerr.Equals(linuxerr.ERESTARTSYS, err) && !deadline.IsZero() {
-			v.Timeout = uint32(max(time.Until(deadline), 0) / time.Millisecond)
+		if linuxerr.Equals(linuxerr.ERESTARTSYS, err) && hasDeadline {
+			v.Timeout = uint32(max(deadline.Sub(clock.Now()), 0) / time.Millisecond)
 		}
 	}
 	return copyOut(t, cmd, addr, &v, err)

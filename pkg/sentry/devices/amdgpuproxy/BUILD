@@ -30,6 +30,7 @@ go_library(
         "//pkg/sentry/fsutil",
         "//pkg/sentry/kernel",
         "//pkg/sentry/kernel/auth",
+        "//pkg/sentry/ktime",
         "//pkg/sentry/memmap",
         "//pkg/sentry/mm",
         "//pkg/sentry/platform",

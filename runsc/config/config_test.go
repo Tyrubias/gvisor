@@ -49,6 +49,24 @@ func TestDefault(t *testing.T) {
 	}
 }
 
+func TestAMDGPUPlatform(t *testing.T) {
+	for _, platform := range []string{"auto", "systrap", "kvm", "ptrace"} {
+		t.Run(platform, func(t *testing.T) {
+			flags := flag.NewFlagSet("test", flag.ContinueOnError)
+			RegisterFlags(flags)
+			for name, value := range map[string]string{"platform": platform, "amdgpuproxy": "compute"} {
+				if err := flags.Set(name, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := NewFromFlags(flags)
+			if wantError := platform != "auto" && platform != "systrap"; (err != nil) != wantError {
+				t.Fatalf("NewFromFlags() error = %v, want error: %t", err, wantError)
+			}
+		})
+	}
+}
+
 func TestRegisterFlagsXDPIsolation(t *testing.T) {
 	first := flag.NewFlagSet("first", flag.ContinueOnError)
 	RegisterFlags(first)

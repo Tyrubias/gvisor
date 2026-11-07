@@ -602,7 +602,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("--platform=%s accepts only --platform_device_path={platform}={path}[,{platform}={path}...], got %q", PlatformAuto, c.PlatformDevicePath)
 	}
 
-	if c.AMDGPUProxy != AMDGPUProxyDisabled && c.Platform != "systrap" {
+	if c.AMDGPUProxy != AMDGPUProxyDisabled && c.Platform != "systrap" && c.Platform != PlatformAuto {
 		return fmt.Errorf("--amdgpuproxy=%v requires --platform=systrap", c.AMDGPUProxy)
 	}
 	if c.Overlay && c.Overlay2.Enabled() {

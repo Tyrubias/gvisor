@@ -290,6 +290,9 @@ type Systrap struct {
 	// the Sentry. Since memoryFile is platform-private, it is never restored,
 	// so it is safe to call memoryFile.FD() rather than memoryFile.DataFD().
 	memoryFile *pgalloc.MemoryFile
+
+	// hostDeviceIO enables protected device operations in application mms.
+	hostDeviceIO bool
 }
 
 // MinUserAddress implements platform.MinUserAddress.
@@ -384,6 +387,7 @@ func New(opts platform.Options) (*Systrap, error) {
 	return &Systrap{
 		UseHostGlobalMemoryBarrier: platform.UseHostGlobalMemoryBarrier{MemBarrier: memBarrier},
 		memoryFile:                 mf,
+		hostDeviceIO:               opts.HostDeviceIO,
 	}, nil
 }
 
