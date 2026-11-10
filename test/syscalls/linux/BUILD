@@ -350,6 +350,21 @@ cc_binary(
 )
 
 cc_binary(
+    name = "amdgpu_vmm_test",
+    testonly = 1,
+    srcs = ["amdgpu_vmm.cc"],
+    linkopts = ["-ldl"],
+    linkstatic = 1,
+    malloc = "//test/util:errno_safe_allocator",
+    deps = select_gtest() + [
+        "//test/util:file_descriptor",
+        "//test/util:test_main",
+        "//test/util:test_util",
+        "@com_google_absl//absl/cleanup",
+    ],
+)
+
+cc_binary(
     name = "bad_test",
     testonly = 1,
     srcs = ["bad.cc"],
