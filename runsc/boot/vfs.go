@@ -211,6 +211,7 @@ func rdmaproxyRegisterDevices(info *containerInfo, vfsObj *vfs.VirtualFilesystem
 		leafUevent[snapshot.PCINodes[i].Path] = snapshot.PCINodes[i].Attrs["uevent"]
 	}
 	driverByMinor := make(map[uint32]string)
+	abiByMinor := make(map[uint32]string)
 	for i := range snapshot.Devices {
 		dev := &snapshot.Devices[i]
 		// Snapshot attribute values are verbatim file contents; trim before
@@ -224,6 +225,7 @@ func rdmaproxyRegisterDevices(info *containerInfo, vfsObj *vfs.VirtualFilesystem
 		if err != nil {
 			continue
 		}
+		abiByMinor[uint32(minor64)] = dev.ABIVersion
 		for _, line := range strings.Split(leafUevent[dev.LeafPCI], "\n") {
 			if driver, ok := strings.CutPrefix(line, "DRIVER="); ok {
 				driverByMinor[uint32(minor64)] = driver
@@ -245,7 +247,7 @@ func rdmaproxyRegisterDevices(info *containerInfo, vfsObj *vfs.VirtualFilesystem
 		minor := uint32(devSpec.Minor)
 		devName := filepath.Base(devSpec.Path)
 		driverName := driverByMinor[minor]
-		if err := rdmaproxy.Register(vfsObj, devName, minor, driverName, snapshot.VerbsABIVersion); err != nil {
+		if err := rdmaproxy.Register(vfsObj, devName, minor, driverName, snapshot.VerbsABIVersion, abiByMinor[minor], specutils.AMDGPUProxyEnabled(info.spec, info.conf)); err != nil {
 			log.Warningf("rdma: register %s: %v", devSpec.Path, err)
 			continue
 		}

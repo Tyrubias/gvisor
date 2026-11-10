@@ -739,6 +739,10 @@ syscall_test(
 )
 
 syscall_test(
+    test = "//test/syscalls/linux:rdma_test",
+)
+
+syscall_test(
     add_fusefs = True,
     add_overlay = True,
     test = "//test/syscalls/linux:read_test",

@@ -40,18 +40,22 @@ type Driver interface {
 	// up the driver at registration time.
 	Name() string
 
+	// ABIVersions returns the supported vendor ABI versions. An empty slice
+	// permits any vendor ABI version.
+	ABIVersions() []uint32
+
 	// PrepareCreateDMA mirrors the DMA buffers referenced by the vendor
 	// driver-private payload of a CQ or QP CREATE and rewrites the embedded
 	// app addresses in uhwIn IN PLACE to the corresponding sentry-side
 	// mappings. uhwIn is the sentry-side copy of the UHW_IN attribute the
 	// core already copied in from the guest; the host kernel will forward it
 	// to the vendor driver verbatim. The CQ and QP driver-private structs
-	// share the buf/doorbell prefix this needs, so CREATE type is not passed.
+	// may have different layouts. action identifies the CREATE operation.
 	//
 	// It returns a handle tracking the mirrored pages, stored by the core
 	// against the resulting CQ/QP handle and released on teardown, or nil if
 	// the payload referenced no buffers. A non-nil error aborts the ioctl.
-	PrepareCreateDMA(t *kernel.Task, uhwIn []byte) (*PinnedDMABufs, error)
+	PrepareCreateDMA(t *kernel.Task, action DmaKind, uhwIn []byte) (*PinnedDMABufs, error)
 
 	// Schemas returns the driver-namespace (object, method) pairs this driver
 	// models (IDs >= UVERBS_ID_DRIVER_NS), keyed by SchemaKey, which the core

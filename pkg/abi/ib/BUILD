@@ -6,7 +6,10 @@ licenses(["notice"])
 
 go_library(
     name = "ib",
-    srcs = ["ib.go"],
+    srcs = [
+        "ib.go",
+        "ionic.go",
+    ],
     hostlayout = True,
     importpath = "gvisor.dev/gvisor/pkg/abi/ib",
     marshal = True,

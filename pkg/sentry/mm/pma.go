@@ -795,8 +795,21 @@ func (mm *MemoryManager) Pin(ctx context.Context, ar hostarch.AddrRange, at host
 		ar.End = pendaddr
 	}
 
+	prs := mm.pinPMAsLocked(ctx, pseg, ar)
+	mm.activeMu.Unlock()
+
+	// Return the first error in order of progress through ar.
+	if perr != nil {
+		return prs, perr
+	}
+	return prs, verr
+}
+
+// pinPMAsLocked acquires references to the PMAs in ar, starting at pseg.
+//
+// +checklocksread:mm.activeMu
+func (mm *MemoryManager) pinPMAsLocked(ctx context.Context, pseg pmaIterator, ar hostarch.AddrRange) []PinnedRange {
 	memCgID := pgalloc.MemoryCgroupIDFromContext(ctx)
-	// Gather pmas.
 	var prs []PinnedRange
 	for pseg.Ok() && pseg.Start() < ar.End {
 		psar := pseg.Range().Intersect(ar)
@@ -810,13 +823,7 @@ func (mm *MemoryManager) Pin(ctx context.Context, ar hostarch.AddrRange, at host
 		})
 		pseg = pseg.NextSegment()
 	}
-	mm.activeMu.Unlock()
-
-	// Return the first error in order of progress through ar.
-	if perr != nil {
-		return prs, perr
-	}
-	return prs, verr
+	return prs
 }
 
 // PinnedRanges are returned by MemoryManager.Pin.

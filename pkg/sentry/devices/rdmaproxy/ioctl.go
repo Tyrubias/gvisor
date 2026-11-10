@@ -27,6 +27,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
+	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/usermem"
 )
@@ -73,6 +74,9 @@ func (fd *uverbsFD) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, ar
 // translated strictly by its declared type; DMA buffers are mirrored; the
 // request is forwarded to the host uverbs FD; and outputs are copied back.
 func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (uintptr, error) {
+	fd.ioctlMu.Lock()
+	defer fd.ioctlMu.Unlock()
+
 	var hdr ib.UverbsIoctlHdr
 	if _, err := hdr.CopyIn(t, argPtr); err != nil {
 		return 0, err
@@ -212,6 +216,7 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 	// Method-specific DMA / fd pre-processing that operates on inline values
 	// (which the generic loop leaves untouched).
 	var mrMirror *MirroredPages
+	var mrAppStart uint64
 	var cqqpMirror *PinnedDMABufs
 	var dmaCleanup cleanup.Cleanup
 	defer dmaCleanup.Clean()
@@ -242,7 +247,7 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 				return 0, err
 			}
 		}
-		mp, err := fd.prepareCreateDMA(t, staged)
+		mp, err := fd.prepareCreateDMA(t, schema.Dma, staged)
 		if err != nil {
 			log.Warningf("rdmaproxy: CQ/QP/SRQ CREATE page mirroring: %v", err)
 			return 0, err
@@ -260,6 +265,16 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 		cmd := invokeWriteCmd(attrs)
 		switch classifyInvokeWrite(cmd) {
 		case invokeWriteRegMR:
+			var cmd ib.UverbsRegMR
+			coreIn := staged[ib.UVERBS_ATTR_CORE_IN]
+			if len(coreIn) < cmd.SizeBytes() {
+				return 0, linuxerr.EINVAL
+			}
+			cmd.UnmarshalBytes(coreIn)
+			mrAppStart = cmd.Start
+			if fd.appMemory {
+				break
+			}
 			mp, err := fd.prepareInvokeWriteRegMR(t, staged)
 			if err != nil {
 				log.Warningf("rdmaproxy: INVOKE_WRITE REG_MR page mirroring: %v", err)
@@ -267,7 +282,7 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 			}
 			if mp != nil {
 				mrMirror = mp
-				dmaCleanup.Add(func() { mp.Release(t) })
+				dmaCleanup.Add(func() { mrMirror.Release(t) })
 			}
 		case invokeWriteDeregMR:
 			// Mirror released post-call once the host reports success.
@@ -293,7 +308,25 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 	// attr data fields, so the attrs are re-unmarshaled from buf after the call.
 	buf := make([]byte, hdr.Length)
 	ib.MarshalUnsafeUverbsAttrSlice(attrs, hdr.MarshalUnsafe(buf))
-	n, errno := invokeUverbsIoctl(fd.hostFD, buf)
+	var n uintptr
+	var ioctlErr error
+	if fd.appMemory && schema.Dma == DmaInvokeWrite && invokeWriteCmd(attrs) == ib.IB_USER_VERBS_CMD_REG_MR {
+		// CPU-accessible GPU allocations can require the registering process's
+		// GPU address space. Keep the backing pinned and register from that mm.
+		var err error
+		n, mrMirror, err = fd.invokeAppMR(t, &hdr, attrs, staged, mrAppStart)
+		if err != nil {
+			return 0, err
+		}
+		dmaCleanup.Add(func() { mrMirror.Release(t) })
+		ib.MarshalUnsafeUverbsAttrSlice(attrs, hdr.MarshalUnsafe(buf))
+	} else {
+		ret, errno := invokeUverbsIoctl(fd.hostFD, buf)
+		n = ret
+		if errno != 0 {
+			ioctlErr = errno
+		}
+	}
 	// Keep the staged buffers alive until the host syscall returns: their
 	// addresses were laundered through a uintptr into buf, so the GC cannot
 	// otherwise see that the in-flight ioctl still references them.
@@ -305,7 +338,7 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 	var asyncFDCleanup cleanup.Cleanup
 	defer asyncFDCleanup.Clean()
 
-	if errno == 0 {
+	if ioctlErr == nil {
 		handleAttr := findAttr(attrs, schema.HandleAttr)
 		haveHandle := handleAttr != nil
 		var handle uint32
@@ -409,7 +442,7 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 	// every rewritten data field so the guest observes only its own values.
 	for i := range xlats {
 		x := &xlats[i]
-		if errno == 0 && x.outBuf != nil {
+		if ioctlErr == nil && x.outBuf != nil {
 			// Best-effort: the guest pointer was validated on the way in.
 			t.CopyOutBytes(hostarch.Addr(x.orig), x.outBuf)
 		}
@@ -422,10 +455,61 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 	}
 	asyncFDCleanup.Release()
 
-	if errno != 0 {
-		return n, errno
+	if ioctlErr != nil {
+		return n, ioctlErr
 	}
 	return n, nil
+}
+
+// invokeAppMR registers pinned application memory from its host process. All
+// ioctl attributes and nested buffers are captured while application threads
+// are stopped. No application pointer is used as an ioctl output buffer.
+func (fd *uverbsFD) invokeAppMR(t *kernel.Task, hdr *ib.UverbsIoctlHdr, attrs []ib.UverbsAttr, staged map[uint16][]byte, appStart uint64) (uintptr, *MirroredPages, error) {
+	io, ok := t.MemoryManager().AddressSpace().(platform.HostDeviceIO)
+	if !ok {
+		return 0, nil, linuxerr.EOPNOTSUPP
+	}
+	coreIn := staged[ib.UVERBS_ATTR_CORE_IN]
+	var cmd ib.UverbsRegMR
+	cmd.UnmarshalBytes(coreIn)
+	if cmd.Length == 0 || cmd.Length > maxMirrorLen {
+		return 0, nil, linuxerr.EINVAL
+	}
+	ar, ok := hostarch.Addr(appStart).ToRange(cmd.Length)
+	if !ok {
+		return 0, nil, linuxerr.EINVAL
+	}
+	ar.Start = ar.Start.RoundDown()
+	ar.End, ok = ar.End.RoundUp()
+	if !ok {
+		return 0, nil, linuxerr.EINVAL
+	}
+	cmd.Start = appStart
+	// INVOKE_WRITE returns its response through CORE_OUT.
+	cmd.Response = 0
+	cmd.MarshalBytes(coreIn)
+	buf := make([]byte, hdr.Length)
+	ib.MarshalUnsafeUverbsAttrSlice(attrs, hdr.MarshalUnsafe(buf))
+	nested := make([]platform.HostIoctlBuffer, 0, len(staged))
+	for i := range attrs {
+		if data, ok := staged[attrs[i].AttrID]; ok {
+			nested = append(nested, platform.HostIoctlBuffer{
+				PointerOffset: int(ib.SizeofUverbsIoctlHdr) + i*int(ib.SizeofUverbsAttr) + 8,
+				Data:          data,
+			})
+		}
+	}
+	var n uintptr
+	prs, err := t.MemoryManager().PinAddressSpaceMappings(t, ar, func() error {
+		var err error
+		n, err = io.IoctlHostDevice(fd.hostFD, ib.RDMAVerbsIoctl, buf, nested...)
+		return err
+	})
+	ib.UnmarshalUnsafeUverbsAttrSlice(attrs, buf[ib.SizeofUverbsIoctlHdr:])
+	if err != nil {
+		return n, nil, err
+	}
+	return n, &MirroredPages{prs: prs}, nil
 }
 
 // validateQPCreate rejects QP modes with unsupported send queue layouts.
@@ -549,7 +633,7 @@ func (fd *uverbsFD) prepareInvokeWriteRegMR(t *kernel.Task, staged map[uint16][]
 func (fd *uverbsFD) prepareMRReg(t *kernel.Task, attrs []ib.UverbsAttr, xlats *[]xlat) (*MirroredPages, error) {
 	addr := findAttr(attrs, ib.UVERBS_ATTR_REG_MR_ADDR)
 	length := findAttr(attrs, ib.UVERBS_ATTR_REG_MR_LENGTH)
-	if addr == nil || addr.Len == 0 || length == nil || length.Len == 0 || length.Data == 0 {
+	if addr == nil || length == nil || length.Data == 0 {
 		return nil, nil
 	}
 	mp, sentryVA, err := MirrorAppPages(t, addr.Data, length.Data)
@@ -580,13 +664,9 @@ func (fd *uverbsFD) prepareDMABufFD(t *kernel.Task, attrs []ib.UverbsAttr, xlats
 // prepareCreateDMA hands the copied-in UHW_IN driver payload to the vendor
 // driver so it can mirror the CQ/QP/SRQ work-queue and doorbell buffers and
 // rewrite the embedded addresses in place.
-func (fd *uverbsFD) prepareCreateDMA(t *kernel.Task, staged map[uint16][]byte) (*PinnedDMABufs, error) {
+func (fd *uverbsFD) prepareCreateDMA(t *kernel.Task, action DmaKind, staged map[uint16][]byte) (*PinnedDMABufs, error) {
 	uhw := staged[ib.UVERBS_ATTR_UHW_IN]
-	if uhw == nil {
-		// No driver payload (absent, or inline with no buffer pointers).
-		return nil, nil
-	}
-	return fd.driver.PrepareCreateDMA(t, uhw)
+	return fd.driver.PrepareCreateDMA(t, action, uhw)
 }
 
 // wrapAsyncEventFD wraps the host async-event fd the kernel wrote into the FD

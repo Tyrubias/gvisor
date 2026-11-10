@@ -39,6 +39,9 @@ type cxDriver struct{}
 // Name implements rdmaproxy.Driver.Name.
 func (cxDriver) Name() string { return driverName }
 
+// ABIVersions implements rdmaproxy.Driver.ABIVersions.
+func (cxDriver) ABIVersions() []uint32 { return nil }
+
 // PrepareCreateDMA implements rdmaproxy.Driver.PrepareCreateDMA. It mirrors the
 // work-queue buffer (buf_addr) and doorbell page (db_addr) referenced by the
 // mlx5 driver-private payload, rewriting both fields to their sentry-side
@@ -48,7 +51,7 @@ func (cxDriver) Name() string { return driverName }
 // buffer is mirrored from buf_addr to the end of its VMA (the buffer is a
 // single mlx5-allocated mapping); rdmaproxy caps the pinned length. The
 // doorbell is a small record within one page, so a single page is mirrored.
-func (cxDriver) PrepareCreateDMA(t *kernel.Task, uhwIn []byte) (*rdmaproxy.PinnedDMABufs, error) {
+func (cxDriver) PrepareCreateDMA(t *kernel.Task, _ rdmaproxy.DmaKind, uhwIn []byte) (*rdmaproxy.PinnedDMABufs, error) {
 	var prefix ib.Mlx5CreatePrefix
 	if len(uhwIn) < prefix.SizeBytes() {
 		return nil, nil
@@ -69,7 +72,7 @@ func (cxDriver) PrepareCreateDMA(t *kernel.Task, uhwIn []byte) (*rdmaproxy.Pinne
 		if err != nil {
 			return nil, err
 		}
-		bufs.Buf = mp
+		bufs.Buffers[0] = mp
 		cu.Add(func() { mp.Release(t) })
 		prefix.BufAddr = uint64(sentryVA)
 	}
@@ -79,7 +82,7 @@ func (cxDriver) PrepareCreateDMA(t *kernel.Task, uhwIn []byte) (*rdmaproxy.Pinne
 		if err != nil {
 			return nil, err
 		}
-		bufs.DB = mp
+		bufs.Buffers[1] = mp
 		cu.Add(func() { mp.Release(t) })
 		prefix.DBAddr = uint64(sentryVA)
 	}

@@ -51,9 +51,11 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/devices/amdgpuproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
+	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy/cxproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy/efaproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy/genericproxy"
+	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy/ionicproxy"
 	"gvisor.dev/gvisor/pkg/sentry/fdimport"
 	cgroup2fs "gvisor.dev/gvisor/pkg/sentry/fsimpl/cgroup2fs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
@@ -699,6 +701,7 @@ func New(args Args) (*Loader, error) {
 		cxproxy.Init()
 		efaproxy.Init()
 		genericproxy.Init()
+		ionicproxy.Init()
 		version.UseRDMARelease()
 		args.StartupTimer.Reached("RDMA proxy initialized")
 	}
@@ -1263,6 +1266,9 @@ func createPlatform(spec *specs.Spec, conf *config.Config, numCPU int, deviceFil
 			hostMMIOIoctlRules = amdgpuproxy.HostMMIOIoctlRules()
 		} else {
 			hostMMIOIoctlRules = seccomp.Or{hostMMIOIoctlRules, amdgpuproxy.HostMMIOIoctlRules()}
+		}
+		if specutils.RDMAEnabled(spec, conf) {
+			hostMMIOIoctlRules = seccomp.Or{hostMMIOIoctlRules, rdmaproxy.HostMMIOIoctlRules()}
 		}
 	}
 

@@ -36,6 +36,9 @@ type efaDriver struct{}
 // Name implements rdmaproxy.Driver.Name.
 func (efaDriver) Name() string { return driverName }
 
+// ABIVersions implements rdmaproxy.Driver.ABIVersions.
+func (efaDriver) ABIVersions() []uint32 { return nil }
+
 // PrepareCreateDMA implements rdmaproxy.Driver.PrepareCreateDMA. EFA CQ/QP
 // CREATE command structs (efa_ibv_create_cq / efa_ibv_create_qp) carry no
 // userspace buffer pointers. The host kernel allocates the work-queue and
@@ -44,7 +47,7 @@ func (efaDriver) Name() string { return driverName }
 // uverbs FD at those offsets, which the rdmaproxy core already forwards to the
 // host FD verbatim. There is thus no app memory to mirror or rewrite at CREATE
 // time, so PrepareCreateDMA is a no-op.
-func (efaDriver) PrepareCreateDMA(t *kernel.Task, uhwIn []byte) (*rdmaproxy.PinnedDMABufs, error) {
+func (efaDriver) PrepareCreateDMA(t *kernel.Task, _ rdmaproxy.DmaKind, uhwIn []byte) (*rdmaproxy.PinnedDMABufs, error) {
 	return nil, nil
 }
 

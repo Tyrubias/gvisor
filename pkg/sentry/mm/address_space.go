@@ -83,7 +83,7 @@ const asyncLoadMapUnit = 32 << 20
 // +checklocksexclude:mm.mappingMu
 // +checklocksexclude:mm.activeMu
 func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar hostarch.AddrRange) error {
-	return mm.ensureAddressSpaceMappings(ctx, ar, false /* allowDeviceMappings */)
+	return mm.ensureAddressSpaceMappings(ctx, ar, false /* allowDeviceMappings */, nil, nil)
 }
 
 // EnsureAddressSpaceMappingsForCPU prepares application mappings for host
@@ -93,12 +93,31 @@ func (mm *MemoryManager) EnsureAddressSpaceMappings(ctx context.Context, ar host
 // +checklocksexclude:mm.mappingMu
 // +checklocksexclude:mm.activeMu
 func (mm *MemoryManager) EnsureAddressSpaceMappingsForCPU(ctx context.Context, ar hostarch.AddrRange) error {
-	return mm.ensureAddressSpaceMappings(ctx, ar, true /* allowDeviceMappings */)
+	return mm.ensureAddressSpaceMappings(ctx, ar, true /* allowDeviceMappings */, nil, nil)
+}
+
+// PinAddressSpaceMappings pins ar and runs f with those mappings installed in
+// the application's host address space. Device mappings remain in place.
+// Mappings cannot change until f returns. The caller owns the returned pins
+// and must release them with Unpin. On error, no pins are returned.
+// Private device mappings are not supported.
+//
+// f must not access the MemoryManager or acquire filesystem locks.
+//
+// +checklocksexclude:mm.mappingMu
+// +checklocksexclude:mm.activeMu
+func (mm *MemoryManager) PinAddressSpaceMappings(ctx context.Context, ar hostarch.AddrRange, f func() error) ([]PinnedRange, error) {
+	var pins []PinnedRange
+	if err := mm.ensureAddressSpaceMappings(ctx, ar, true /* allowDeviceMappings */, &pins, f); err != nil {
+		Unpin(pins)
+		return nil, err
+	}
+	return pins, nil
 }
 
 // +checklocksexclude:mm.mappingMu
 // +checklocksexclude:mm.activeMu
-func (mm *MemoryManager) ensureAddressSpaceMappings(ctx context.Context, ar hostarch.AddrRange, allowDeviceMappings bool) error {
+func (mm *MemoryManager) ensureAddressSpaceMappings(ctx context.Context, ar hostarch.AddrRange, allowDeviceMappings bool, pins *[]PinnedRange, f func() error) error {
 	if !ar.WellFormed() || ar.Length() == 0 || !ar.IsPageAligned() || !mm.applicationAddrRange().IsSupersetOf(ar) {
 		return linuxerr.EFAULT
 	}
@@ -114,6 +133,13 @@ func (mm *MemoryManager) ensureAddressSpaceMappings(ctx context.Context, ar host
 		if !vma.realPerms.Read && !vma.realPerms.Write {
 			return linuxerr.EACCES
 		}
+		if pins != nil && !vma.realPerms.SupersetOf(hostarch.ReadWrite) {
+			return linuxerr.EACCES
+		}
+		if pins != nil && vma.requirePlatformEffect && vma.private {
+			// Resolving copy-on-write would remove the host device VMA.
+			return linuxerr.EOPNOTSUPP
+		}
 		if vma.requirePlatformEffect && !allowDeviceMappings {
 			return linuxerr.EFAULT
 		}
@@ -121,20 +147,27 @@ func (mm *MemoryManager) ensureAddressSpaceMappings(ctx context.Context, ar host
 
 	mm.activeMu.Lock()
 	for vseg := vfirst; vseg.Ok() && vseg.Start() < ar.End; vseg = vseg.NextSegment() {
-		if vseg.ValuePtr().requirePlatformEffect {
+		if vseg.ValuePtr().requirePlatformEffect && pins == nil {
 			continue
 		}
 		at := hostarch.Read
 		if vseg.ValuePtr().effectivePerms.Write {
 			at = hostarch.Write
 		}
-		if _, _, err := mm.getPMAsLocked(ctx, vseg, vseg.Range().Intersect(ar), at, false /* callerIndirectCommit */, false /* forPin */); err != nil {
+		if pins != nil {
+			at = hostarch.ReadWrite
+			mm.hasPinned = true
+		}
+		if _, _, err := mm.getPMAsLocked(ctx, vseg, vseg.Range().Intersect(ar), at, false /* callerIndirectCommit */, pins != nil /* forPin */); err != nil {
 			mm.activeMu.Unlock()
 			return err
 		}
 	}
 	mm.activeMu.DowngradeLock()
 	defer mm.activeMu.RUnlock()
+	if pins != nil {
+		*pins = mm.pinPMAsLocked(ctx, mm.pmas.LowerBoundSegment(ar.Start), ar)
+	}
 
 	// Limit mapping to ar: remapping an adjacent device VMA can destroy state
 	// maintained by its driver. Mapping whole PMAs, rather than faulting one
@@ -150,6 +183,9 @@ func (mm *MemoryManager) ensureAddressSpaceMappings(ctx context.Context, ar host
 		if err := mm.mapASLocked(ctx, mm.pmas.LowerBoundSegment(vr.Start), vr, memmap.PlatformEffectPopulate); err != nil {
 			return err
 		}
+	}
+	if f != nil {
+		return f()
 	}
 	return nil
 }

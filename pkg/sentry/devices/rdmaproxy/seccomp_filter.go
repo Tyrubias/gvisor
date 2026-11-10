@@ -21,6 +21,11 @@ import (
 	"gvisor.dev/gvisor/pkg/seccomp"
 )
 
+// HostMMIOIoctlRules permits memory registration in an application's host mm.
+func HostMMIOIoctlRules() seccomp.SyscallRule {
+	return seccomp.PerArg{seccomp.NonNegativeFD{}, seccomp.EqualTo(uintptr(ib.RDMAVerbsIoctl))}
+}
+
 // Filters returns the seccomp-bpf filters the RDMA proxy adds to the base
 // sandbox filter.
 func Filters() seccomp.SyscallRules {

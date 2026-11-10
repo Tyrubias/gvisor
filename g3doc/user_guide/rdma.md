@@ -20,26 +20,55 @@ sandbox as on the host.
 RDMA support is enabled with the `--rdmaproxy` flag and applies to containers
 whose OCI spec lists one or more `/dev/infiniband/uverbs*` devices.
 
-When combined with GPUs (see [NVIDIA GPU Support](gpu.md)), gVisor supports
-GPUDirect RDMA, allowing the NIC to transfer data directly to and from GPU
-memory.
+When combined with [NVIDIA GPUs](gpu.md) or [AMD GPUs](amd_gpu.md), gVisor
+supports GPU Direct RDMA. The NIC transfers data directly to and from GPU
+memory registered through dma-buf descriptors.
+
+## AMD GPUs
+
+Enable both `--amdgpuproxy=compute` and `--rdmaproxy` on the systrap platform.
+The OCI specification must include `/dev/kfd`, the GPU render nodes, and the
+RDMA verbs devices. The container's `libibverbs` provider must support the
+host NIC driver's ABI version.
+
+Use a dma-buf-capable RCCL version and enable its RDMA transport. For RCCL
+versions that require explicit dma-buf selection, set `NCCL_DMABUF_ENABLE=1`
+and `RCCL_FORCE_ENABLE_DMABUF=1`. Ensure that `NCCL_IB_DISABLE` is unset or
+zero. Check RCCL's logs to confirm that it selected `NET/IB` and GPU Direct
+RDMA with dma-buf.
+
+RCCL can also allocate CPU-accessible control buffers in fine-grained GPU
+memory and register them by virtual address. With AMD GPU support enabled,
+these registrations execute in the application's host process. gVisor pins
+the backing memory and holds its mappings stable during registration. Ioctl
+arguments and results use protected buffers.
+GPU device mappings used by these registrations must be shared mappings.
+
+RDMA is a network transport. GPUs in one machine can instead use direct peer
+access over xGMI or PCIe. Enabling RDMA does not require disabling these local
+transports, and forcing network transport between local GPUs can reduce
+performance.
+
+When forcing RDMA between local GPUs with RCCL 2.30.4, set
+`RCCL_HIERARCHICAL_ALLGATHER=0`. The default hierarchical all-gather can return
+incorrect results with local transports disabled. Validate all-gather and
+reduce-scatter as well as all-reduce before running a workload.
 
 ## Limitations
 
 RDMA support is under active development. The following limitations apply:
 
-*   **Mellanox and AWS EFA NICs only.** Only Mellanox ConnectX (`mlx5`) adapters
-    and AWS Elastic Fabric Adapters (`efa`) are currently supported. Support for
-    additional vendors is planned.
+*   **Supported NIC drivers.** Mellanox ConnectX (`mlx5`), AWS Elastic Fabric
+    Adapter (`efa`), Intel iRDMA, and AMD Pensando (`ionic`) adapters are
+    supported. Pensando support requires vendor ABI version 1.
 
 *   **Host kernel 5.12 or newer.** `rdmaproxy` proxies the modern
     `RDMA_VERBS_IOCTL` interface only; the legacy `write(2)` command interface
     is not supported. The newest uverbs ioctl method it relies on, dma-buf
     memory registration for GPUDirect RDMA, landed in Linux 5.12.
 
-*   **GPUDirect uses dma-buf only.** GPU memory is registered with the NIC
-    through the dma-buf mechanism, which is the modern default. The legacy
-    `nvidia-peermem` kernel-module path is not supported.
+*   **NVIDIA GPUDirect uses dma-buf only.** The legacy `nvidia-peermem`
+    kernel-module path is not supported.
 
 *   **EFA needs a dma-buf-capable NCCL plugin.** Because GPUDirect works only
     through dma-buf (above), AWS EFA requires `aws-ofi-nccl` v1.19.2 or newer:

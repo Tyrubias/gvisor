@@ -32,9 +32,12 @@ type genericDriver struct{}
 // Name implements rdmaproxy.Driver.Name.
 func (d genericDriver) Name() string { return rdmaproxy.GenericDriverName }
 
+// ABIVersions implements rdmaproxy.Driver.ABIVersions.
+func (genericDriver) ABIVersions() []uint32 { return nil }
+
 // PrepareCreateDMA implements rdmaproxy.Driver.PrepareCreateDMA. It is a
 // no-op: the UHW payload is forwarded verbatim and no pages are mirrored.
-func (genericDriver) PrepareCreateDMA(t *kernel.Task, uhwIn []byte) (*rdmaproxy.PinnedDMABufs, error) {
+func (genericDriver) PrepareCreateDMA(t *kernel.Task, _ rdmaproxy.DmaKind, uhwIn []byte) (*rdmaproxy.PinnedDMABufs, error) {
 	return nil, nil
 }
 

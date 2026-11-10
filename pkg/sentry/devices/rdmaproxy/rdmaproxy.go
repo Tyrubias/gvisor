@@ -45,9 +45,9 @@ package rdmaproxy
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/ib"
@@ -63,6 +63,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -83,6 +84,8 @@ type uverbsDevice struct {
 	// name at Register time. Always non-nil: Register refuses to register a
 	// device whose host PCI driver has no plug-in.
 	driver Driver
+	// appMemory selects memory registration in the application's host process.
+	appMemory bool
 }
 
 // Open implements vfs.Device.Open.
@@ -99,8 +102,9 @@ func (dev *uverbsDevice) Open(ctx context.Context, mnt *vfs.Mount, vfsd *vfs.Den
 		return nil, err
 	}
 	fd := &uverbsFD{
-		hostFD: int32(hostFD),
-		driver: dev.driver,
+		hostFD:    int32(hostFD),
+		driver:    dev.driver,
+		appMemory: dev.appMemory,
 	}
 	if err := fdnotifier.AddFD(fd.hostFD, &fd.queue); err != nil {
 		unix.Close(hostFD)
@@ -141,19 +145,16 @@ func (mp *MirroredPages) Release(ctx context.Context) {
 // Driver plug-ins return this from PrepareCreateDMA; the core stores it against
 // the resulting object handle until DESTROY.
 type PinnedDMABufs struct {
-	// Buf is the work-queue buffer mirror, or nil if the driver produced none.
-	Buf *MirroredPages
-	// DB is the doorbell page mirror, or nil if the driver produced none.
-	DB *MirroredPages
+	// Buffers retains the work-queue and doorbell mappings of one object.
+	Buffers [2]*MirroredPages
 }
 
 // Release tears down both buffer mirrors. Safe to call with nil fields.
 func (p *PinnedDMABufs) Release(ctx context.Context) {
-	if p.Buf != nil {
-		p.Buf.Release(ctx)
-	}
-	if p.DB != nil {
-		p.DB.Release(ctx)
+	for _, buffer := range p.Buffers {
+		if buffer != nil {
+			buffer.Release(ctx)
+		}
 	}
 }
 
@@ -249,6 +250,11 @@ type uverbsFD struct {
 	// driver is the per-vendor plug-in inherited from the originating
 	// uverbsDevice at Open time. Always non-nil; see uverbsDevice.driver.
 	driver Driver
+	// appMemory selects memory registration in the application's host process.
+	appMemory bool
+
+	// ioctlMu serializes host object changes with their pinned-page records.
+	ioctlMu sync.Mutex
 
 	// pinned tracks app memory mirrored on behalf of MRs, CQs, and QPs
 	// registered or created through this uverbs FD.
@@ -257,9 +263,10 @@ type uverbsFD struct {
 
 // Release implements vfs.FileDescriptionImpl.Release.
 func (fd *uverbsFD) Release(ctx context.Context) {
-	fd.pinned.releaseAll(ctx)
 	fdnotifier.RemoveFD(fd.hostFD)
 	unix.Close(int(fd.hostFD))
+	// The host context must stop DMA before its backing pages are released.
+	fd.pinned.releaseAll(ctx)
 }
 
 // EventRegister implements waiter.Waitable.EventRegister.
@@ -311,7 +318,8 @@ func (fd *uverbsFD) Readiness(mask waiter.EventMask) waiter.EventMask {
 //
 // verbsABIVersion is the host's IB_USER_VERBS_ABI_VERSION collected host-side
 // before the sandbox started. An empty string means it could not be collected.
-func Register(vfsObj *vfs.VirtualFilesystem, devName string, minor uint32, driverName, verbsABIVersion string) error {
+// appMemory requires HostDeviceIO with RDMA ioctls admitted in its host process.
+func Register(vfsObj *vfs.VirtualFilesystem, devName string, minor uint32, driverName, verbsABIVersion, deviceABIVersion string, appMemory bool) error {
 	// Validate the kernel uverbs ABI version. A mismatch means the kernel
 	// ships an unfamiliar UVERBS interface (refuse rather than risk
 	// misinterpreting attribute layouts).
@@ -325,8 +333,14 @@ func Register(vfsObj *vfs.VirtualFilesystem, devName string, minor uint32, drive
 	if driver == nil {
 		return fmt.Errorf("rdmaproxy: no vendor plug-in for driver %q — refusing to register %s (supported: %v)", driverName, devName, RegisteredDrivers())
 	}
+	if versions := driver.ABIVersions(); len(versions) != 0 {
+		version, err := strconv.ParseUint(strings.TrimSpace(deviceABIVersion), 10, 32)
+		if err != nil || !slices.Contains(versions, uint32(version)) {
+			return fmt.Errorf("rdmaproxy: unsupported %s ABI version %q (supported: %v)", driverName, deviceABIVersion, versions)
+		}
+	}
 	log.Infof("rdmaproxy: registering %s with major=%d minor=%d driver=%s (requested=%q)", devName, ib.IB_UVERBS_MAJOR, minor, driver.Name(), driverName)
-	return vfsObj.RegisterDevice(vfs.CharDevice, ib.IB_UVERBS_MAJOR, minor, &uverbsDevice{devName: devName, driver: driver}, &vfs.RegisterDeviceOptions{
+	return vfsObj.RegisterDevice(vfs.CharDevice, ib.IB_UVERBS_MAJOR, minor, &uverbsDevice{devName: devName, driver: driver, appMemory: appMemory}, &vfs.RegisterDeviceOptions{
 		GroupName: "infiniband",
 		Pathname:  filepath.Join("infiniband", devName),
 		FilePerms: 0666,

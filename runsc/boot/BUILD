@@ -79,6 +79,7 @@ go_library(
         "//pkg/sentry/devices/rdmaproxy/cxproxy",
         "//pkg/sentry/devices/rdmaproxy/efaproxy",
         "//pkg/sentry/devices/rdmaproxy/genericproxy",
+        "//pkg/sentry/devices/rdmaproxy/ionicproxy",
         "//pkg/sentry/devices/tpuproxy",
         "//pkg/sentry/devices/tpuproxy/vfio",
         "//pkg/sentry/devices/ttydev",

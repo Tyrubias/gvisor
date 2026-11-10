@@ -139,6 +139,7 @@ func MirrorAppPages(t *kernel.Task, addr, length uint64) (*MirroredPages, uintpt
 	at := hostarch.ReadWrite
 	prs, pinErr := t.MemoryManager().Pin(t, appAR, at, false /* ignorePermissions */)
 	if pinErr != nil {
+		mm.Unpin(prs)
 		return nil, 0, pinErr
 	}
 
