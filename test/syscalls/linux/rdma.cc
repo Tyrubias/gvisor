@@ -19,7 +19,6 @@
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
-#include <thread>
 #include <vector>
 
 #include "gmock/gmock.h"
@@ -27,6 +26,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "test/util/file_descriptor.h"
 #include "test/util/test_util.h"
+#include "test/util/thread_util.h"
 
 struct ibv_device;
 struct ibv_context;
@@ -51,24 +51,26 @@ TEST(Rdma, PensandoGpuDmaBuf) {
     GTEST_SKIP() << "libibverbs is unavailable";
   }
   absl::Cleanup close_verbs = [verbs] { dlclose(verbs); };
-  auto get_devices = Symbol<ibv_device** (*)(int*)>(verbs, "ibv_get_device_list");
+  auto get_devices =
+      Symbol<ibv_device** (*)(int*)>(verbs, "ibv_get_device_list");
   auto free_devices =
       Symbol<void (*)(ibv_device**)>(verbs, "ibv_free_device_list");
-  auto get_name = Symbol<const char* (*)(ibv_device*)>(verbs,
-                                                       "ibv_get_device_name");
+  auto get_name =
+      Symbol<const char* (*)(ibv_device*)>(verbs, "ibv_get_device_name");
   auto open_device =
       Symbol<ibv_context* (*)(ibv_device*)>(verbs, "ibv_open_device");
-  auto close_device =
-      Symbol<int (*)(ibv_context*)>(verbs, "ibv_close_device");
+  auto close_device = Symbol<int (*)(ibv_context*)>(verbs, "ibv_close_device");
   auto alloc_pd = Symbol<ibv_pd* (*)(ibv_context*)>(verbs, "ibv_alloc_pd");
   auto dealloc_pd = Symbol<int (*)(ibv_pd*)>(verbs, "ibv_dealloc_pd");
-  auto reg_host = Symbol<ibv_mr* (*)(ibv_pd*, void*, size_t, int)>(
-      verbs, "ibv_reg_mr");
-  auto create_cq = Symbol<ibv_cq* (*)(ibv_context*, int, void*, ibv_comp_channel*,
-                                    int)>(verbs, "ibv_create_cq");
+  auto reg_host =
+      Symbol<ibv_mr* (*)(ibv_pd*, void*, size_t, int)>(verbs, "ibv_reg_mr");
+  auto create_cq =
+      Symbol<ibv_cq* (*)(ibv_context*, int, void*, ibv_comp_channel*, int)>(
+          verbs, "ibv_create_cq");
   auto destroy_cq = Symbol<int (*)(ibv_cq*)>(verbs, "ibv_destroy_cq");
-  auto reg_dmabuf = Symbol<ibv_mr* (*)(ibv_pd*, uint64_t, size_t, uint64_t, int,
-                                     int)>(verbs, "ibv_reg_dmabuf_mr");
+  auto reg_dmabuf =
+      Symbol<ibv_mr* (*)(ibv_pd*, uint64_t, size_t, uint64_t, int, int)>(
+          verbs, "ibv_reg_dmabuf_mr");
   auto dereg_mr = Symbol<int (*)(ibv_mr*)>(verbs, "ibv_dereg_mr");
   ASSERT_NE(get_devices, nullptr);
   ASSERT_NE(free_devices, nullptr);
@@ -96,32 +98,33 @@ TEST(Rdma, PensandoGpuDmaBuf) {
     GTEST_SKIP() << "No Pensando RDMA device";
   }
 
-  void* hip = dlopen("libamdhip64.so.7", RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
+  void* hip =
+      dlopen("libamdhip64.so.7", RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
   if (hip == nullptr) {
     hip = dlopen("libamdhip64.so.6", RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
   }
-  void* hsa = dlopen("libhsa-runtime64.so.1", RTLD_NOW | RTLD_NODELETE);
-  if (hip == nullptr || hsa == nullptr) {
-    GTEST_SKIP() << "AMD HIP/HSA libraries are unavailable";
+  void* rocr = dlopen("libhsa-runtime64.so.1", RTLD_NOW | RTLD_NODELETE);
+  if (hip == nullptr || rocr == nullptr) {
+    GTEST_SKIP() << "AMD HIP/ROCr libraries are unavailable";
   }
   absl::Cleanup close_hip = [hip] { dlclose(hip); };
-  absl::Cleanup close_hsa = [hsa] { dlclose(hsa); };
+  absl::Cleanup close_rocr = [rocr] { dlclose(rocr); };
   auto device_count = Symbol<int (*)(int*)>(hip, "hipGetDeviceCount");
   auto set_device = Symbol<int (*)(int)>(hip, "hipSetDevice");
   auto allocate = Symbol<int (*)(void**, size_t)>(hip, "hipMalloc");
-  auto allocate_fine = Symbol<int (*)(void**, size_t, unsigned)>(
-      hip, "hipExtMallocWithFlags");
+  auto allocate_fine =
+      Symbol<int (*)(void**, size_t, unsigned)>(hip, "hipExtMallocWithFlags");
   auto free = Symbol<int (*)(void*)>(hip, "hipFree");
-  auto export_dmabuf = Symbol<int (*)(const void*, size_t, int*, uint64_t*,
-                                     uint64_t)>(
-      hsa, "hsa_amd_portable_export_dmabuf_v2");
+  auto export_dmabuf =
+      Symbol<int (*)(const void*, size_t, int*, uint64_t*, uint64_t)>(
+          rocr, "hsa_amd_portable_export_dmabuf_v2");
   ASSERT_NE(device_count, nullptr);
   ASSERT_NE(set_device, nullptr);
   ASSERT_NE(allocate, nullptr);
   ASSERT_NE(allocate_fine, nullptr);
   ASSERT_NE(free, nullptr);
   if (export_dmabuf == nullptr) {
-    GTEST_SKIP() << "HSA has no PCIe dma-buf export support";
+    GTEST_SKIP() << "ROCr has no PCIe dma-buf export support";
   }
   int gpus = 0;
   if (device_count(&gpus) != 0 || gpus == 0) {
@@ -144,7 +147,9 @@ TEST(Rdma, PensandoGpuDmaBuf) {
     SCOPED_TRACE(name);
     ibv_context* context = open_device(devices[i]);
     ASSERT_NE(context, nullptr);
-    absl::Cleanup release_context = [&] { EXPECT_EQ(close_device(context), 0); };
+    absl::Cleanup release_context = [&] {
+      EXPECT_EQ(close_device(context), 0);
+    };
     ibv_pd* pd = alloc_pd(context);
     ASSERT_NE(pd, nullptr);
     absl::Cleanup release_pd = [&] { EXPECT_EQ(dealloc_pd(pd), 0); };
@@ -160,20 +165,18 @@ TEST(Rdma, PensandoGpuDmaBuf) {
     ASSERT_NE(cq, nullptr);
     absl::Cleanup release_cq = [&] { EXPECT_EQ(destroy_cq(cq), 0); };
     // Exercise registration and handle reuse on one shared uverbs context.
-    std::vector<std::thread> workers;
-    for (int worker = 0; worker < 2; ++worker) {
-      workers.emplace_back([&] {
-        for (int iteration = 0; iteration < 16; ++iteration) {
-          ibv_mr* mr = reg_host(pd, host_memory.data(), host_memory.size(), 7);
-          ASSERT_NE(mr, nullptr);
-          EXPECT_EQ(dereg_mr(mr), 0);
-        }
-      });
-    }
-    for (auto& worker : workers) {
-      worker.join();
-    }
-    // HSA mapping types NONE and PCIE.
+    auto register_memory = [&] {
+      for (int iteration = 0; iteration < 16; ++iteration) {
+        ibv_mr* mr = reg_host(pd, host_memory.data(), host_memory.size(), 7);
+        ASSERT_NE(mr, nullptr);
+        EXPECT_EQ(dereg_mr(mr), 0);
+      }
+    };
+    ScopedThread first(register_memory);
+    ScopedThread second(register_memory);
+    first.Join();
+    second.Join();
+    // ROCr mapping types NONE and PCIE.
     for (uint64_t flags : {0, 1}) {
       SCOPED_TRACE(flags);
       int fd = -1;
@@ -181,9 +184,9 @@ TEST(Rdma, PensandoGpuDmaBuf) {
       ASSERT_EQ(export_dmabuf(memory, kSize, &fd, &offset, flags), 0);
       FileDescriptor dmabuf(fd);
       constexpr int kAccess = 1 | 2 | 4;  // Local write, remote write/read.
-      ibv_mr* mr = reg_dmabuf(pd, offset, kSize,
-                            reinterpret_cast<uint64_t>(memory), dmabuf.get(),
-                            kAccess);
+      ibv_mr* mr =
+          reg_dmabuf(pd, offset, kSize, reinterpret_cast<uint64_t>(memory),
+                     dmabuf.get(), kAccess);
       ASSERT_NE(mr, nullptr);
       absl::Cleanup release_mr = [&] { EXPECT_EQ(dereg_mr(mr), 0); };
       // The memory registration retains the exported object after fd close.
