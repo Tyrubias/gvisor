@@ -13,7 +13,8 @@ behaves the same inside the sandbox as on the host.
 
 AMD GPU support is **experimental**. The proxy admits MI300X (gfx942) and
 MI350X/MI355X (gfx950) GPUs. Multi-process HIP, IPC, PyTorch, and SGLang serving
-have been validated on an MI350X. For NVIDIA GPUs, see [NVIDIA GPU Support](gpu.md).
+have been validated on an MI350X and on eight MI355X GPUs. For NVIDIA GPUs, see
+[NVIDIA GPU Support](gpu.md).
 
 ## Enabling AMD GPU support
 
@@ -46,8 +47,7 @@ AMD Instinct MI300X
 ```
 
 Granting several render nodes exposes several GPUs to the same application;
-the proxy validates each GPU in mapping and sharing requests. Multi-GPU
-hardware validation is still required.
+the proxy validates each GPU in mapping and sharing requests.
 
 ## Interprocess sharing
 
@@ -71,6 +71,41 @@ python3 -m sglang.launch_server \
 
 The model directory must contain the downloaded weights. This configuration
 has been checked with concurrent requests to `/v1/chat/completions`.
+
+### RCCL symmetric memory
+
+RCCL can use HIP virtual memory management (VMM) and symmetric memory for
+collectives between GPUs. VMM is separate from shared virtual memory (SVM).
+Keep `HSA_USE_SVM=0` and `HSA_XNACK=0` when you enable VMM.
+
+Grant all participating GPUs and enable RCCL's VMM allocations and window
+registration:
+
+```
+NCCL_CUMEM_ENABLE=1
+NCCL_WIN_ENABLE=1
+```
+
+Add `--enable-symm-mem` to the SGLang server command. SGLang can otherwise
+disable RCCL VMM allocations. Add `--disable-custom-all-reduce` to route
+all-reduce operations through RCCL when you validate this path. Keep RCCL
+peer-to-peer transport enabled for GPUs in the same host. This configuration
+has been validated with `DeepSeek-V4-Flash-0731` and tensor parallelism across
+eight MI355X GPUs.
+
+Select VMM explicitly. RCCL's automatic selection can depend on the kernel
+version reported by the sandbox. To verify the path, check for `P2P/CUMEM`
+channels and successful window registrations with non-null window handles.
+The environment variables alone do not prove that application buffers use
+symmetric memory.
+
+SGLang builds its symmetric-memory allocator at startup, so the image must
+contain a C++ compiler and ROCm development headers and libraries. Some ROCm
+images provide only `librccl.so.1`, while the allocator links with `-lnccl`.
+In that case, create a separate build-library directory with a `libnccl.so`
+symlink to the same `librccl.so.1` that the application loads, and add that
+directory to `LIBRARY_PATH`. The directory can be mounted read-only in the
+container. This supplies the link name without changing the RCCL runtime.
 
 ## Limitations
 
