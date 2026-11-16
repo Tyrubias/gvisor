@@ -37,7 +37,8 @@ func (s *subprocess) IoctlHostDeviceFlat(hostFD int32, request uint32, buf []byt
 	if hostFD < 0 {
 		return platform.HostIoctlResult{}, unix.EBADF
 	}
-	if len(buf) > len(syscallStubMessage{}.ioctlParams) {
+	paramsSize := int(hostarch.PageSize) - int(unsafe.Sizeof(syscallStubMessage{}))
+	if len(buf) > paramsSize {
 		return platform.HostIoctlResult{}, unix.E2BIG
 	}
 	size := (len(buf) + 7) &^ 7
@@ -45,7 +46,7 @@ func (s *subprocess) IoctlHostDeviceFlat(hostFD int32, request uint32, buf []byt
 		if b.PointerOffset < 0 || b.PointerOffset > len(buf)-8 {
 			return platform.HostIoctlResult{}, unix.EINVAL
 		}
-		if len(b.Data) > len(syscallStubMessage{}.ioctlParams)-size {
+		if len(b.Data) > paramsSize-size {
 			return platform.HostIoctlResult{}, unix.E2BIG
 		}
 		size += (len(b.Data) + 7) &^ 7
@@ -64,32 +65,35 @@ func (s *subprocess) IoctlHostDeviceFlat(hostFD int32, request uint32, buf []byt
 		s.hostMMBound.Store(true)
 
 		t := s.syscallThread
-		paramsAddr := t.stubAddr + syscallStubMessageOffset + unsafe.Offsetof(syscallStubMessage{}.ioctlParams)
+		paramsAddr := t.stubAddr + syscallStubMessageOffset + unsafe.Sizeof(syscallStubMessage{})
+		// The rest of the reply page contains application-controlled data.
+		// Translated host FDs and Sentry pointers must never be stored here.
+		params := unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(t.stubMessage), unsafe.Sizeof(*t.stubMessage))), paramsSize)
 		offset := (len(buf) + 7) &^ 7
 		for i, b := range nested {
 			ptrs[i] = hostarch.ByteOrder.Uint64(buf[b.PointerOffset:])
 			var ptr uint64
 			if len(b.Data) != 0 {
 				ptr = uint64(paramsAddr) + uint64(offset)
-				copy(t.stubMessage.ioctlParams[offset:], b.Data)
+				copy(params[offset:], b.Data)
 			}
 			// Relocate before publishing buf: its original pointer may name
 			// Sentry memory, which must not be exposed to the application.
 			hostarch.ByteOrder.PutUint64(buf[b.PointerOffset:], ptr)
 			offset += (len(b.Data) + 7) &^ 7
 		}
-		copy(t.stubMessage.ioctlParams[:], buf)
+		copy(params, buf)
 		// CLONE_FILES shares hostFD with the stub. The syscall request page is
 		// read-only there, protecting the FD, command, and parameter address.
 		ret, err := t.syscall(unix.SYS_IOCTL,
 			arch.SyscallArgument{Value: uintptr(hostFD)},
 			arch.SyscallArgument{Value: uintptr(request)},
 			arch.SyscallArgument{Value: paramsAddr})
-		copy(buf, t.stubMessage.ioctlParams[:])
+		copy(buf, params)
 		offset = (len(buf) + 7) &^ 7
 		for i, b := range nested {
 			hostarch.ByteOrder.PutUint64(buf[b.PointerOffset:], ptrs[i])
-			copy(b.Data, t.stubMessage.ioctlParams[offset:offset+len(b.Data)])
+			copy(b.Data, params[offset:offset+len(b.Data)])
 			offset += (len(b.Data) + 7) &^ 7
 		}
 		// The scratch page and syscall return are guest-writable. Keep the

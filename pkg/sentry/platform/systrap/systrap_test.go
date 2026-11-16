@@ -223,6 +223,13 @@ func TestHostMMIO(t *testing.T) {
 	if err != nil || result.Errno != 0 || hostarch.ByteOrder.Uint32(params[:]) != 3 {
 		t.Fatalf("TIOCINQ: got %+v, %v, %v; want 3 bytes", result, err, params)
 	}
+	scratch := make([]byte, hostarch.PageSize-8)
+	if result, err := s.IoctlFlat(int32(r.Fd()), unix.TIOCINQ, scratch); err != nil || result.Errno != 0 || hostarch.ByteOrder.Uint32(scratch) != 3 {
+		t.Fatalf("TIOCINQ with full scratch page: got %+v, %v; want 3 bytes", result, err)
+	}
+	if _, err := s.IoctlFlat(int32(r.Fd()), unix.TIOCINQ, append(scratch, 0)); err != unix.E2BIG {
+		t.Fatalf("IoctlFlat with oversized scratch: got %v, want E2BIG", err)
+	}
 	null, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatal(err)
