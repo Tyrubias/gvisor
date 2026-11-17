@@ -212,7 +212,7 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 			deviceDirs = append(deviceDirs, dirs)
 		}
 		if idata.RDMASysfs != nil {
-			dirs, err := fs.newRDMASysfs(ctx, creds, idata.RDMASysfs)
+			dirs, err := fs.newRDMASysfs(ctx, creds, idata.RDMASysfs, hostNodes)
 			if err != nil {
 				return nil, nil, err
 			}

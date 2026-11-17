@@ -154,7 +154,7 @@ func (t *dirTree) collapseNUMA(hostNodes []uint32, cores uint) {
 }
 
 // newRDMASysfs builds the RDMA sysfs subtrees from snap.
-func (fs *filesystem) newRDMASysfs(ctx context.Context, creds *auth.Credentials, snap *rdma.Snapshot) (*sysfsDirs, error) {
+func (fs *filesystem) newRDMASysfs(ctx context.Context, creds *auth.Credentials, snap *rdma.Snapshot, hostNodes []uint32) (*sysfsDirs, error) {
 	root := newDirTree()
 	classIB := map[string]string{}     // ibdev -> symlink target
 	classUverbs := map[string]string{} // uverbsN -> symlink target
@@ -189,7 +189,6 @@ func (fs *filesystem) newRDMASysfs(ctx context.Context, creds *auth.Credentials,
 	// synthesized /sys/bus/pci, so it is not a host escape hatch. The
 	// bus/<bus> entry each device sits on is created for pci_bus below.
 	cores := kernel.KernelFromContext(ctx).ApplicationCores()
-	hostNodes := hostCPUNodes(snap.NUMA)
 	for _, n := range snap.PCINodes {
 		if err := checkRelPath(n.Path); err != nil {
 			return nil, err
