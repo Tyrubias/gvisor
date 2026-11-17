@@ -139,7 +139,7 @@ func TestNUMATopologyBootGate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &mountInfo{mount: &specs.Mount{Type: sys.Name}}
-			_, opts, err := getMountNameAndOptions(tc.spec, tc.conf, m, "", "", "", nil, nil)
+			_, opts, err := getMountNameAndOptions(tc.spec, tc.conf, m, "", "", "", nil, nil, nil)
 			if err != nil {
 				t.Fatalf("getMountNameAndOptions failed: %v", err)
 			}
