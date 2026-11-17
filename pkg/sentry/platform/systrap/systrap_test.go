@@ -287,7 +287,7 @@ func TestHostDeviceIO(t *testing.T) {
 	}
 	defer unix.Close(sock)
 	var ifconf [16]byte
-	interfaces := make([]byte, 512)
+	interfaces := make([]byte, int(hostarch.PageSize)-8-len(ifconf))
 	hostarch.ByteOrder.PutUint32(ifconf[:], uint32(len(interfaces)))
 	result, err := s.IoctlHostDeviceFlat(int32(sock), unix.SIOCGIFCONF, ifconf[:], platform.HostIoctlBuffer{PointerOffset: 8, Data: interfaces})
 	if err != nil || result.Errno != 0 {
@@ -299,7 +299,7 @@ func TestHostDeviceIO(t *testing.T) {
 	if ptr := hostarch.ByteOrder.Uint64(ifconf[8:]); ptr != 0 {
 		t.Fatalf("SIOCGIFCONF: pointer was not restored: %#x", ptr)
 	}
-	if _, err := s.IoctlHostDeviceFlat(int32(sock), unix.SIOCGIFCONF, ifconf[:], platform.HostIoctlBuffer{PointerOffset: 8, Data: make([]byte, 4096)}); err != unix.E2BIG {
+	if _, err := s.IoctlHostDeviceFlat(int32(sock), unix.SIOCGIFCONF, ifconf[:], platform.HostIoctlBuffer{PointerOffset: 8, Data: append(interfaces, 0)}); err != unix.E2BIG {
 		t.Fatalf("oversized nested buffer: got %v, want E2BIG", err)
 	}
 	r, w, err := os.Pipe()
